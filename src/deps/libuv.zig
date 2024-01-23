@@ -1,4 +1,5 @@
 const bun = @import("root").bun;
+
 const WORD = c_ushort;
 const LARGE_INTEGER = i64;
 const std = @import("std");
@@ -19,10 +20,8 @@ const FILE = std.c.FILE;
 const CRITICAL_SECTION = *anyopaque;
 const INPUT_RECORD = *const anyopaque;
 const sockaddr = std.os.sockaddr;
-const sockaddr_in = std.os.sockaddr_in;
-const sockaddr_in6 = std.os.sockaddr_in6;
-const sockaddr_storage = std.os.sockaddr_storage;
-const sockaddr_un = std.os.sockaddr_un;
+const sockaddr_storage = std.os.linux.sockaddr_storage;
+const sockaddr_un = std.os.linux.sockaddr_un;
 const BOOL = windows.BOOL;
 const Env = bun.Environment;
 
@@ -187,28 +186,31 @@ pub const UV__DT_FIFO = UV_DIRENT_FIFO;
 pub const UV__DT_SOCKET = UV_DIRENT_SOCKET;
 pub const UV__DT_CHAR = UV_DIRENT_CHAR;
 pub const UV__DT_BLOCK = UV_DIRENT_BLOCK;
-pub const UV_FS_O_APPEND = O.APPEND;
-pub const UV_FS_O_CREAT = O.CREAT;
-pub const UV_FS_O_EXCL = O.EXCL;
-pub const UV_FS_O_FILEMAP = @import("std").zig.c_translation.promoteIntLiteral(c_int, 0x20000000, .hex);
-pub const UV_FS_O_RANDOM = O.RANDOM;
-pub const UV_FS_O_RDONLY = O.RDONLY;
-pub const UV_FS_O_RDWR = O.RDWR;
-pub const UV_FS_O_SEQUENTIAL = O.SEQUENTIAL;
-pub const UV_FS_O_SHORT_LIVED = O.SHORT_LIVED;
-pub const UV_FS_O_TEMPORARY = O.TEMPORARY;
-pub const UV_FS_O_TRUNC = O.TRUNC;
-pub const UV_FS_O_WRONLY = O.WRONLY;
-pub const UV_FS_O_DIRECT = @import("std").zig.c_translation.promoteIntLiteral(c_int, 0x02000000, .hex);
-pub const UV_FS_O_DIRECTORY = @as(c_int, 0);
-pub const UV_FS_O_DSYNC = @import("std").zig.c_translation.promoteIntLiteral(c_int, 0x04000000, .hex);
-pub const UV_FS_O_EXLOCK = @import("std").zig.c_translation.promoteIntLiteral(c_int, 0x10000000, .hex);
-pub const UV_FS_O_NOATIME = @as(c_int, 0);
-pub const UV_FS_O_NOCTTY = @as(c_int, 0);
-pub const UV_FS_O_NOFOLLOW = @as(c_int, 0);
-pub const UV_FS_O_NONBLOCK = @as(c_int, 0);
-pub const UV_FS_O_SYMLINK = @as(c_int, 0);
-pub const UV_FS_O_SYNC = @import("std").zig.c_translation.promoteIntLiteral(c_int, 0x08000000, .hex);
+
+// These **do not** map to std.os.O!
+pub const UV_FS_O_APPEND = 0x0008;
+pub const UV_FS_O_CREAT = 0x0100;
+pub const UV_FS_O_EXCL = 0x0400;
+pub const UV_FS_O_FILEMAP = 0x20000000;
+pub const UV_FS_O_RANDOM = 0x0010;
+pub const UV_FS_O_RDONLY = 0x0000;
+pub const UV_FS_O_RDWR = 0x0002;
+pub const UV_FS_O_SEQUENTIAL = 0x0020;
+pub const UV_FS_O_SHORT_LIVED = 0x1000;
+pub const UV_FS_O_TEMPORARY = 0x0040;
+pub const UV_FS_O_TRUNC = 0x0200;
+pub const UV_FS_O_WRONLY = 0x0001;
+pub const UV_FS_O_DIRECT = 0x02000000;
+pub const UV_FS_O_DIRECTORY = 0;
+pub const UV_FS_O_DSYNC = 0x04000000;
+pub const UV_FS_O_EXLOCK = 0x10000000;
+pub const UV_FS_O_NOATIME = 0;
+pub const UV_FS_O_NOCTTY = 0;
+pub const UV_FS_O_NOFOLLOW = 0;
+pub const UV_FS_O_NONBLOCK = 0;
+pub const UV_FS_O_SYMLINK = 0;
+pub const UV_FS_O_SYNC = 0x08000000;
+
 pub const UV_PRIORITY_LOW = @as(c_int, 19);
 pub const UV_PRIORITY_BELOW_NORMAL = @as(c_int, 10);
 pub const UV_PRIORITY_NORMAL = @as(c_int, 0);
@@ -264,7 +266,7 @@ pub const uv_random_s = struct_uv_random_s;
 pub const uv_env_item_s = struct_uv_env_item_s;
 pub const uv_cpu_times_s = struct_uv_cpu_times_s;
 pub const uv_cpu_info_s = struct_uv_cpu_info_s;
-pub const uv_interface_address_s = struct_uv_interface_address_s;
+pub const uv_interface_address_s = uv_interface_address_s;
 pub const uv_passwd_s = struct_uv_passwd_s;
 pub const uv_group_s = struct_uv_group_s;
 pub const uv_utsname_s = struct_uv_utsname_s;
@@ -522,6 +524,14 @@ pub const Loop = extern struct {
     wq_mutex: uv_mutex_t,
     wq_async: uv_async_t,
 
+    pub fn subActive(this: *Loop, value: u32) void {
+        this.active_handles -= value;
+    }
+
+    pub fn addActive(this: *Loop, value: u32) void {
+        this.active_handles += value;
+    }
+
     pub fn inc(this: *Loop) void {
         this.active_handles += 1;
     }
@@ -540,12 +550,12 @@ pub const Loop = extern struct {
     }
 
     pub fn close(ptr: *Loop) void {
-        uv_loop_close(ptr);
+        _ = uv_loop_close(ptr);
     }
 
-    pub fn new() ?bun.C.E {
-        const ptr = bun.default_allocator.create(Loop);
-        if (init(ptr)) |e| return e;
+    pub fn new() ?*Loop {
+        const ptr = bun.default_allocator.create(Loop) catch return null;
+        if (init(ptr) != null) return null;
         return ptr;
     }
 
@@ -633,7 +643,7 @@ pub const uv_buf_t = extern struct {
 
     pub fn init(input: []const u8) uv_buf_t {
         std.debug.assert(input.len <= @as(usize, std.math.maxInt(ULONG)));
-        return .{ .len = @intCast(input.len), .base = @constCast(input.ptr) };
+        return .{ .len = @truncate(input.len), .base = @constCast(input.ptr) };
     }
 
     pub fn slice(this: *const @This()) []u8 {
@@ -831,9 +841,10 @@ const union_unnamed_380 = extern union {
     fd: c_int,
     reserved: [4]?*anyopaque,
 };
-pub const uv_alloc_cb = ?*const fn (*uv_handle_t, usize, [*]uv_buf_t) callconv(.C) void;
+pub const uv_alloc_cb = ?*const fn (*uv_handle_t, usize, *uv_buf_t) callconv(.C) void;
 pub const uv_stream_t = struct_uv_stream_s;
-pub const uv_read_cb = ?*const fn (*uv_stream_t, isize, [*]const uv_buf_t) callconv(.C) void;
+/// *uv.uv_handle_t is actually *uv_stream_t, just changed to avoid dependency loop error on Zig
+pub const uv_read_cb = ?*const fn (*uv_handle_t, isize, *const uv_buf_t) callconv(.C) void;
 const struct_unnamed_382 = extern struct {
     overlapped: OVERLAPPED,
     queued_bytes: usize,
@@ -872,7 +883,7 @@ const union_unnamed_386 = extern union {
     io: struct_unnamed_387,
     connect: struct_unnamed_388,
 };
-pub const uv_shutdown_cb = ?*const fn ([*c]uv_shutdown_t, c_int) callconv(.C) void;
+pub const uv_shutdown_cb = ?*const fn (*uv_shutdown_t, c_int) callconv(.C) void;
 pub const struct_uv_shutdown_s = extern struct {
     data: ?*anyopaque,
     type: uv_req_type,
@@ -1098,7 +1109,7 @@ const union_unnamed_412 = extern union {
     io: struct_unnamed_413,
     connect: struct_unnamed_414,
 };
-pub const uv_write_cb = ?*const fn ([*c]uv_write_t, c_int) callconv(.C) void;
+pub const uv_write_cb = ?*const fn (*uv_write_t, ReturnCode) callconv(.C) void;
 pub const struct_uv_write_s = extern struct {
     data: ?*anyopaque,
     type: uv_req_type,
@@ -1135,7 +1146,7 @@ const union_unnamed_405 = extern union {
 };
 pub const struct_uv_pipe_s = extern struct {
     data: ?*anyopaque,
-    loop: *uv_loop_t,
+    loop: ?*uv_loop_t,
     type: uv_handle_type,
     close_cb: uv_close_cb,
     handle_queue: struct_uv__queue,
@@ -1316,7 +1327,7 @@ pub const struct_uv_fs_event_req_s = extern struct {
     next_req: [*c]struct_uv_req_s,
 };
 pub const uv_fs_event_t = struct_uv_fs_event_s;
-pub const uv_fs_event_cb = ?*const fn ([*c]uv_fs_event_t, [*]const u8, c_int, c_int) callconv(.C) void;
+pub const uv_fs_event_cb = ?*const fn (*uv_fs_event_t, [*c]const u8, c_int, c_int) callconv(.C) void;
 pub const struct_uv_fs_event_s = extern struct {
     data: ?*anyopaque,
     loop: *uv_loop_t,
@@ -1653,27 +1664,29 @@ pub const struct_uv_cpu_times_s = extern struct {
     irq: u64,
 };
 pub const struct_uv_cpu_info_s = extern struct {
-    model: [*]u8,
+    model: [*:0]u8,
     speed: c_int,
     cpu_times: struct_uv_cpu_times_s,
 };
 pub const uv_cpu_info_t = struct_uv_cpu_info_s;
-const union_unnamed_460 = extern union {
-    address4: sockaddr_in,
-    address6: sockaddr_in6,
+
+const sockaddr_in = std.os.linux.sockaddr.in;
+const sockaddr_in6 = std.os.linux.sockaddr.in6;
+pub const addr_union = extern union {
+    address4: std.os.linux.sockaddr.in,
+    address6: std.os.linux.sockaddr.in6,
 };
-const union_unnamed_461 = extern union {
-    netmask4: sockaddr_in,
-    netmask6: sockaddr_in6,
+const netmask_union = extern union {
+    netmask4: std.os.linux.sockaddr.in,
+    netmask6: std.os.linux.sockaddr.in6,
 };
-pub const struct_uv_interface_address_s = extern struct {
-    name: [*]u8,
+pub const uv_interface_address_t = extern struct {
+    name: [*:0]u8,
     phys_addr: [6]u8,
     is_internal: c_int,
-    address: union_unnamed_460,
-    netmask: union_unnamed_461,
+    address: addr_union,
+    netmask: netmask_union,
 };
-pub const uv_interface_address_t = struct_uv_interface_address_s;
 pub const struct_uv_passwd_s = extern struct {
     username: [*]u8,
     uid: c_ulong,
@@ -1689,10 +1702,14 @@ pub const struct_uv_group_s = extern struct {
 };
 pub const uv_group_t = struct_uv_group_s;
 pub const struct_uv_utsname_s = extern struct {
-    sysname: [256]u8,
-    release: [256]u8,
-    version: [256]u8,
-    machine: [256]u8,
+    sysname: [255:0]u8,
+    release: [255:0]u8,
+    version: [255:0]u8,
+    machine: [255:0]u8,
+
+    comptime {
+        std.debug.assert(@sizeOf(struct_uv_utsname_s) == 256 * 4);
+    }
 };
 pub const uv_utsname_t = struct_uv_utsname_s;
 pub const struct_uv_statfs_s = extern struct {
@@ -1810,9 +1827,9 @@ pub const UV_LEAVE_GROUP: c_int = 0;
 pub const UV_JOIN_GROUP: c_int = 1;
 pub const uv_membership = c_uint;
 pub extern fn uv_translate_sys_error(sys_errno: c_int) c_int;
-pub extern fn uv_strerror(err: c_int) [*]const u8;
+pub extern fn uv_strerror(err: c_int) [*c]const u8;
 pub extern fn uv_strerror_r(err: c_int, buf: [*]u8, buflen: usize) [*]u8;
-pub extern fn uv_err_name(err: c_int) [*]const u8;
+pub extern fn uv_err_name(err: c_int) [*c]const u8;
 pub extern fn uv_err_name_r(err: c_int, buf: [*]u8, buflen: usize) [*]u8;
 pub extern fn uv_shutdown(req: [*c]uv_shutdown_t, handle: *uv_stream_t, cb: uv_shutdown_cb) c_int;
 pub extern fn uv_handle_size(@"type": uv_handle_type) usize;
@@ -1842,9 +1859,9 @@ pub extern fn uv_listen(stream: [*c]uv_stream_t, backlog: c_int, cb: uv_connecti
 pub extern fn uv_accept(server: [*c]uv_stream_t, client: [*c]uv_stream_t) c_int;
 pub extern fn uv_read_start([*c]uv_stream_t, alloc_cb: uv_alloc_cb, read_cb: uv_read_cb) c_int;
 pub extern fn uv_read_stop([*c]uv_stream_t) c_int;
-pub extern fn uv_write(req: [*c]uv_write_t, handle: *uv_stream_t, bufs: [*]const uv_buf_t, nbufs: c_uint, cb: uv_write_cb) c_int;
-pub extern fn uv_write2(req: [*c]uv_write_t, handle: *uv_stream_t, bufs: [*]const uv_buf_t, nbufs: c_uint, send_handle: *uv_stream_t, cb: uv_write_cb) c_int;
-pub extern fn uv_try_write(handle: *uv_stream_t, bufs: [*]const uv_buf_t, nbufs: c_uint) c_int;
+pub extern fn uv_write(req: *uv_write_t, handle: *uv_stream_t, bufs: [*]const uv_buf_t, nbufs: c_uint, cb: uv_write_cb) ReturnCode;
+pub extern fn uv_write2(req: *uv_write_t, handle: *uv_stream_t, bufs: [*]const uv_buf_t, nbufs: c_uint, send_handle: *uv_stream_t, cb: uv_write_cb) ReturnCode;
+pub extern fn uv_try_write(handle: *uv_stream_t, bufs: [*]const uv_buf_t, nbufs: c_uint) ReturnCode;
 pub extern fn uv_try_write2(handle: *uv_stream_t, bufs: [*]const uv_buf_t, nbufs: c_uint, send_handle: *uv_stream_t) c_int;
 pub extern fn uv_is_readable(handle: *const uv_stream_t) c_int;
 pub extern fn uv_is_writable(handle: *const uv_stream_t) c_int;
@@ -1909,7 +1926,7 @@ pub extern fn uv_guess_handle(file: uv_file) uv_handle_type;
 pub const UV_PIPE_NO_TRUNCATE: c_int = 1;
 const enum_unnamed_462 = c_uint;
 pub extern fn uv_pipe_init(*uv_loop_t, handle: *uv_pipe_t, ipc: c_int) c_int;
-pub extern fn uv_pipe_open([*c]uv_pipe_t, file: uv_file) c_int;
+pub extern fn uv_pipe_open([*c]uv_pipe_t, file: uv_file) ReturnCode;
 pub extern fn uv_pipe_bind(handle: *uv_pipe_t, name: [*]const u8) c_int;
 pub extern fn uv_pipe_bind2(handle: *uv_pipe_t, name: [*]const u8, namelen: usize, flags: c_uint) c_int;
 pub extern fn uv_pipe_connect(req: [*c]uv_connect_t, handle: *uv_pipe_t, name: [*]const u8, cb: uv_connect_cb) void;
@@ -2041,11 +2058,11 @@ pub extern fn uv_os_getppid() uv_pid_t;
 pub extern fn uv_os_getpriority(pid: uv_pid_t, priority: [*c]c_int) c_int;
 pub extern fn uv_os_setpriority(pid: uv_pid_t, priority: c_int) c_int;
 pub extern fn uv_available_parallelism() c_uint;
-pub extern fn uv_cpu_info(cpu_infos: [*c][*c]uv_cpu_info_t, count: [*c]c_int) c_int;
+pub extern fn uv_cpu_info(cpu_infos: *[*]uv_cpu_info_t, count: *c_int) c_int;
 pub extern fn uv_free_cpu_info(cpu_infos: [*c]uv_cpu_info_t, count: c_int) void;
 pub extern fn uv_cpumask_size() c_int;
-pub extern fn uv_interface_addresses(addresses: [*c]?*uv_interface_address_t, count: [*c]c_int) c_int;
-pub extern fn uv_free_interface_addresses(addresses: ?*uv_interface_address_t, count: c_int) void;
+pub extern fn uv_interface_addresses(addresses: *[*]uv_interface_address_t, count: [*c]c_int) c_int;
+pub extern fn uv_free_interface_addresses(addresses: [*]uv_interface_address_t, count: c_int) void;
 pub extern fn uv_os_environ(envitems: [*c][*c]uv_env_item_t, count: [*c]c_int) c_int;
 pub extern fn uv_os_free_environ(envitems: [*c]uv_env_item_t, count: c_int) void;
 pub extern fn uv_os_getenv(name: [*]const u8, buffer: [*]u8, size: [*c]usize) c_int;
@@ -2341,26 +2358,23 @@ pub fn translateUVErrorToE(code: anytype) bun.C.E {
     };
 }
 
-pub const ReturnCode = extern struct {
-    value: c_int,
-
+pub const ReturnCode = enum(c_int) {
+    pub inline fn int(this: ReturnCode) c_int {
+        return @intFromEnum(this);
+    }
     pub inline fn errno(this: ReturnCode) ?@TypeOf(@intFromEnum(bun.C.E.ACCES)) {
-        return if (this.value < 0)
+        return if (this.int() < 0)
             // @intFromEnum(translateUVErrorToE(this.value))
-            @as(u16, @intCast(-this.value))
+            @as(u16, @intCast(-this.int()))
         else
             null;
     }
 
     pub inline fn errEnum(this: ReturnCode) ?bun.C.E {
-        return if (this.value < 0)
-            (translateUVErrorToE(this.value))
+        return if (this.int() < 0)
+            (translateUVErrorToE(this.int()))
         else
             null;
-    }
-
-    comptime {
-        std.debug.assert(@as(c_int, @bitCast(ReturnCode{ .value = 4021 })) == 4021);
     }
 };
 
@@ -2388,3 +2402,37 @@ pub const ReturnCodeI64 = extern struct {
 };
 
 pub const addrinfo = std.os.windows.ws2_32.addrinfo;
+
+fn WriterMixin(comptime Type: type) type {
+    return struct {
+        pub fn write(mixin: *Type, input: []const u8, context: anytype, comptime onWrite: ?*const (fn (*@TypeOf(context), status: ReturnCode) void)) ReturnCode {
+            if (comptime onWrite) |callback| {
+                const Context = @TypeOf(context);
+                var data = bun.new(uv_write_t);
+
+                data.data = context;
+                const Wrapper = struct {
+                    uv_data: uv_write_t,
+                    context: Context,
+                    buf: uv_buf_t,
+
+                    pub fn uvWriteCb(req: *uv_write_t, status: ReturnCode) callconv(.C) void {
+                        const this: *@This() = @fieldParentPtr(@This(), "uv_data", req);
+                        const context_data = this.context;
+                        bun.destroy(this);
+                        callback(context_data, @enumFromInt(status));
+                    }
+                };
+                var wrap = bun.new(Wrapper, Wrapper{
+                    .wrapper = undefined,
+                    .context = context,
+                    .buf = uv_buf_t.init(input),
+                });
+
+                return uv_write(&wrap.uv_data, @ptrCast(mixin), @ptrCast(&wrap.buf), 1, &Wrapper.uvWriteCb);
+            }
+
+            return uv_write(null, mixin, @ptrCast(&uv_buf_t.init(input)), 1, null);
+        }
+    };
+}

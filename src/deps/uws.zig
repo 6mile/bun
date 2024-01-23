@@ -979,11 +979,13 @@ pub const PosixLoop = extern struct {
 
     // This exists as a method so that we can stick a debugger in here
     pub fn addActive(this: *PosixLoop, value: u32) void {
+        log("add {d} + {d} = {d}", .{ this.active, value, this.active +| value });
         this.active +|= value;
     }
 
     // This exists as a method so that we can stick a debugger in here
     pub fn subActive(this: *PosixLoop, value: u32) void {
+        log("sub {d} - {d} = {d}", .{ this.active, value, this.active -| value });
         this.active -|= value;
     }
 
@@ -2493,6 +2495,14 @@ pub const UVLoop = extern struct {
 
     pub fn iterationNumber(this: *const UVLoop) c_longlong {
         return this.internal_loop_data.iteration_nr;
+    }
+
+    pub fn addActive(this: *const UVLoop, val: u32) void {
+        this.uv_loop.addActive(val);
+    }
+
+    pub fn subActive(this: *const UVLoop, val: u32) void {
+        this.uv_loop.subActive(val);
     }
 
     pub fn isActive(this: *const UVLoop) bool {
