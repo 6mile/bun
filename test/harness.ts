@@ -1,5 +1,6 @@
 import { gc as bunGC, unsafe, which } from "bun";
 import { expect } from "bun:test";
+import { platform } from "os";
 
 export const bunEnv: NodeJS.ProcessEnv = {
   ...process.env,
@@ -249,3 +250,25 @@ expect.extend({
     };
   },
 });
+
+export function ospath(path: string) {
+  if (process.platform === "win32") {
+    return path.replace(/\//g, "\\");
+  }
+  return path;
+}
+
+// This is extremely frowned upon but I think it's easier to deal with than
+// remembering to do this manually everywhere
+declare global {
+  interface Buffer {
+    /**
+     * **INTERNAL USE ONLY, NOT An API IN BUN**
+     */
+    toUnixString(): string;
+  }
+}
+
+Buffer.prototype.toUnixString = function () {
+  return this.toString("utf-8").replaceAll("\r\n", "\n");
+};

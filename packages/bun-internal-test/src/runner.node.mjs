@@ -381,8 +381,9 @@ if (failing_tests.length) {
       report += `${reason}\n\n`;
     }
     report += "```\n";
-    report += output.replace(/\x1b\[[0-9;]*m/g, "")
-      .replace(/^::(group|endgroup|error|warning|set-output|add-matcher|remove-matcher).*$/gm, "")
+    report += output
+      .replace(/\x1b\[[0-9;]*m/g, "")
+      .replace(/^::(group|endgroup|error|warning|set-output|add-matcher|remove-matcher).*$/gm, "");
     report += "```\n\n";
   }
 }
@@ -405,10 +406,7 @@ if (ci) {
     if (regressions.length > 0) {
       action.setFailed(`${regressions.length} regressing tests`);
     }
-    action.setOutput(
-      "regressing_tests",
-      regressions.map(({ path }) => `- \`${path}\``).join("\n"),
-    );
+    action.setOutput("regressing_tests", regressions.map(({ path }) => `- \`${path}\``).join("\n"));
     action.setOutput("regressing_test_count", regressions.length);
   } else {
     if (failing_tests.length > 0) {
@@ -417,7 +415,11 @@ if (ci) {
     action.setOutput("failing_tests", failingTestDisplay);
     action.setOutput("failing_tests_count", failing_tests.length);
   }
-  action.summary.addRaw(report);
+  let truncated_report = report;
+  if (truncated_report.length > 512 * 1000) {
+    truncated_report = truncated_report.slice(0, 512 * 1000) + "\n\n...truncated...";
+  }
+  action.summary.addRaw(truncated_report);
   await action.summary.write();
 } else {
   if (windows && (regressions.length > 0 || fixes.length > 0)) {
