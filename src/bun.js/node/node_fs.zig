@@ -4486,7 +4486,11 @@ pub const NodeFS = struct {
     }
 
     pub fn open(this: *NodeFS, args: Arguments.Open, comptime _: Flavor) Maybe(Return.Open) {
-        const path = args.path.sliceZ(&this.sync_error_buf);
+        const path = if (Environment.isWindows and bun.strings.eqlComptime(args.path.slice(), "/dev/null"))
+            "\\\\.\\NUL"
+        else
+            args.path.sliceZ(&this.sync_error_buf);
+
         return switch (Syscall.open(path, @intFromEnum(args.flags), args.mode)) {
             .err => |err| .{
                 .err = err.withPath(args.path.slice()),
@@ -5986,7 +5990,16 @@ pub const NodeFS = struct {
         }
 
         const flags = os.O.DIRECTORY | os.O.RDONLY;
-        const fd = switch (Syscall.openatOSPath(bun.toFD((std.fs.cwd().fd)), src, flags, 0)) {
+        var wbuf: if (Environment.isWindows) bun.WPathBuffer else void = undefined;
+        const fd = switch (Syscall.openatOSPath(
+            bun.toFD((std.fs.cwd().fd)),
+            if (Environment.isWindows and std.fs.path.isAbsoluteWindowsWTF16(src))
+                bun.strings.addNTPathPrefixIfNeeded(&wbuf, src)
+            else
+                src,
+            flags,
+            0,
+        )) {
             .err => |err| {
                 return .{ .err = err.withPath(this.osPathIntoSyncErrorBuf(src)) };
             },
@@ -6323,9 +6336,13 @@ pub const NodeFS = struct {
 
         if (Environment.isWindows) {
             const result = windows.CopyFileW(src, dest, @intFromBool(mode.shouldntOverwrite()));
-            if (Maybe(Return.CopyFile).errnoSysP(result, .copyfile, this.osPathIntoSyncErrorBuf(src))) |e| {
-                return e;
+            if (result == bun.windows.FALSE) {
+                if (Maybe(Return.CopyFile).errnoSysP(result, .copyfile, this.osPathIntoSyncErrorBuf(src))) |e| {
+                    return e;
+                }
             }
+
+            return ret.success;
         }
 
         return ret.todo();
