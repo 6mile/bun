@@ -1,9 +1,10 @@
-// @known-failing-on-windows: 1 failing
 import { spawnSync, which } from "bun";
 import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "fs";
-import { bunEnv, bunExe } from "harness";
+import { bunEnv, bunExe, isWindows, tmpdirSync } from "harness";
 import { basename, join, resolve } from "path";
+
+const process_sleep = join(import.meta.dir, "process-sleep.js");
 
 it("process", () => {
   // this property isn't implemented yet but it should at least return a string
@@ -11,9 +12,11 @@ it("process", () => {
 
   if (!isNode && process.platform !== "win32" && process.title !== "bun") throw new Error("process.title is not 'bun'");
 
-  if (typeof process.env.USER !== "string") throw new Error("process.env is not an object");
+  if (process.platform !== "win32" && typeof process.env.USER !== "string")
+    throw new Error("process.env is not an object");
 
-  if (process.env.USER.length === 0) throw new Error("process.env is missing a USER property");
+  if (process.platform !== "win32" && process.env.USER.length === 0)
+    throw new Error("process.env is missing a USER property");
 
   if (process.platform !== "darwin" && process.platform !== "linux" && process.platform !== "win32")
     throw new Error("process.platform is invalid");
@@ -70,11 +73,11 @@ it("process.hrtime.bigint()", () => {
 it("process.release", () => {
   expect(process.release.name).toBe("node");
   const platform = process.platform == "win32" ? "windows" : process.platform;
-  expect(process.release.sourceUrl).toContain(
-    `https://github.com/oven-sh/bun/release/bun-v${process.versions.bun}/bun-${platform}-${
-      { arm64: "aarch64", x64: "x64" }[process.arch] || process.arch
-    }`,
-  );
+  const arch = { arm64: "aarch64", x64: "x64" }[process.arch] || process.arch;
+  const nonbaseline = `https://github.com/oven-sh/bun/releases/download/bun-v${process.versions.bun}/bun-${platform}-${arch}.zip`;
+  const baseline = `https://github.com/oven-sh/bun/releases/download/bun-v${process.versions.bun}/bun-${platform}-${arch}-baseline.zip`;
+
+  expect(process.release.sourceUrl).toBeOneOf([nonbaseline, baseline]);
 });
 
 it("process.env", () => {
@@ -99,7 +102,24 @@ it("process.env is spreadable and editable", () => {
   expect(process.env).toEqual(process.env);
   eval(`globalThis.process.env.USER = 'bun';`);
   expect(eval(`globalThis.process.env.USER`)).toBe("bun");
-  expect(eval(`globalThis.process.env.USER = "${orig}"`)).toBe(orig);
+  expect(eval(`globalThis.process.env.USER = "${orig}"`)).toBe(String(orig));
+});
+
+const MIN_ICU_VERSIONS_BY_PLATFORM_ARCH = {
+  "darwin-x64": "70.1",
+  "darwin-arm64": "72.1",
+  "linux-x64": "72.1",
+  "linux-arm64": "72.1",
+  "win32-x64": "72.1",
+  "win32-arm64": "72.1",
+};
+
+it("ICU version does not regress", () => {
+  const min = MIN_ICU_VERSIONS_BY_PLATFORM_ARCH[`${process.platform}-${process.arch}`];
+  if (!min) {
+    throw new Error(`Unknown platform/arch: ${process.platform}-${process.arch}`);
+  }
+  expect(parseFloat(process.versions.icu, 10) || 0).toBeGreaterThanOrEqual(parseFloat(min, 10));
 });
 
 it("process.env.TZ", () => {
@@ -126,6 +146,12 @@ it("process.env.TZ", () => {
 
 it("process.version starts with v", () => {
   expect(process.version.startsWith("v")).toBeTruthy();
+});
+
+it("process.version is set", () => {
+  // This implies you forgot -Dreported_nodejs_version in zig build configuration
+  expect(process.version).not.toInclude("0.0.0");
+  expect(process.version).not.toInclude("unset");
 });
 
 it.todo("process.argv0", () => {
@@ -237,7 +263,7 @@ it("process.binding", () => {
 
 it("process.argv in testing", () => {
   expect(process.argv).toBeInstanceOf(Array);
-  expect(process.argv[0]).toBe(bunExe());
+  expect(process.argv[0]).toBe(process.execPath);
 
   // assert we aren't creating a new process.argv each call
   expect(process.argv).toBe(process.argv);
@@ -331,7 +357,8 @@ describe("process.cpuUsage", () => {
     });
   });
 
-  it("works with diff", () => {
+  // Skipped on Windows because it seems UV returns { user: 15000, system: 0 } constantly
+  it.skipIf(process.platform === "win32")("works with diff", () => {
     const init = process.cpuUsage();
     init.system = 1;
     init.user = 1;
@@ -340,7 +367,7 @@ describe("process.cpuUsage", () => {
     expect(delta.system).toBeGreaterThan(0);
   });
 
-  it("works with diff of different structure", () => {
+  it.skipIf(process.platform === "win32")("works with diff of different structure", () => {
     const init = {
       user: 0,
       system: 0,
@@ -366,8 +393,8 @@ describe("process.cpuUsage", () => {
     }
   });
 
-  // Skipped on Linux because it seems to not change as often as on macOS
-  it.skipIf(process.platform === "linux")("increases monotonically", () => {
+  // Skipped on Linux/Windows because it seems to not change as often as on macOS
+  it.skipIf(process.platform !== "darwin")("increases monotonically", () => {
     const init = process.cpuUsage();
     for (let i = 0; i < 10000; i++) {}
     const another = process.cpuUsage();
@@ -376,39 +403,50 @@ describe("process.cpuUsage", () => {
   });
 });
 
-it("process.getegid", () => {
-  expect(typeof process.getegid()).toBe("number");
-});
-it("process.geteuid", () => {
-  expect(typeof process.geteuid()).toBe("number");
-});
-it("process.getgid", () => {
-  expect(typeof process.getgid()).toBe("number");
-});
-it("process.getgroups", () => {
-  expect(process.getgroups()).toBeInstanceOf(Array);
-  expect(process.getgroups().length).toBeGreaterThan(0);
-});
-it("process.getuid", () => {
-  expect(typeof process.getuid()).toBe("number");
-});
-
-it("process.getuid", () => {
-  expect(typeof process.getuid()).toBe("number");
-});
+if (process.platform !== "win32") {
+  it("process.getegid", () => {
+    expect(typeof process.getegid()).toBe("number");
+  });
+  it("process.geteuid", () => {
+    expect(typeof process.geteuid()).toBe("number");
+  });
+  it("process.getgid", () => {
+    expect(typeof process.getgid()).toBe("number");
+  });
+  it("process.getgroups", () => {
+    expect(process.getgroups()).toBeInstanceOf(Array);
+    expect(process.getgroups().length).toBeGreaterThan(0);
+  });
+  it("process.getuid", () => {
+    expect(typeof process.getuid()).toBe("number");
+  });
+  it("process.getuid", () => {
+    expect(typeof process.getuid()).toBe("number");
+  });
+} else {
+  it("process.getegid, process.geteuid, process.getgid, process.getgroups, process.getuid, process.getuid are not implemented on Windows", () => {
+    expect(process.getegid).toBeUndefined();
+    expect(process.geteuid).toBeUndefined();
+    expect(process.getgid).toBeUndefined();
+    expect(process.getgroups).toBeUndefined();
+    expect(process.getuid).toBeUndefined();
+    expect(process.getuid).toBeUndefined();
+  });
+}
 
 describe("signal", () => {
   const fixture = join(import.meta.dir, "./process-signal-handler.fixture.js");
-  it("simple case works", async () => {
+  it.skipIf(isWindows)("simple case works", async () => {
     const child = Bun.spawn({
       cmd: [bunExe(), fixture, "SIGUSR1"],
       env: bunEnv,
+      stderr: "inherit",
     });
 
     expect(await child.exited).toBe(0);
     expect(await new Response(child.stdout).text()).toBe("PASS\n");
   });
-  it("process.emit will call signal events", async () => {
+  it.skipIf(isWindows)("process.emit will call signal events", async () => {
     const child = Bun.spawn({
       cmd: [bunExe(), fixture, "SIGUSR2"],
       env: bunEnv,
@@ -420,26 +458,38 @@ describe("signal", () => {
 
   it("process.kill(2) works", async () => {
     const child = Bun.spawn({
-      cmd: ["bash", "-c", "sleep 1000000"],
+      cmd: [bunExe(), process_sleep, "1000000"],
       stdout: "pipe",
+      env: bunEnv,
     });
     const prom = child.exited;
     const ret = process.kill(child.pid, "SIGTERM");
     expect(ret).toBe(true);
     await prom;
-    expect(child.signalCode).toBe("SIGTERM");
+    if (process.platform === "win32") {
+      expect(child.exitCode).toBe(1);
+    } else {
+      expect(child.signalCode).toBe("SIGTERM");
+    }
   });
 
   it("process._kill(2) works", async () => {
     const child = Bun.spawn({
-      cmd: ["bash", "-c", "sleep 1000000"],
+      cmd: [bunExe(), process_sleep, "1000000"],
       stdout: "pipe",
+      env: bunEnv,
     });
     const prom = child.exited;
-    const ret = process.kill(child.pid, "SIGKILL");
-    expect(ret).toBe(true);
+    // SIGKILL as a number
+    const SIGKILL = 9;
+    process._kill(child.pid, SIGKILL);
     await prom;
-    expect(child.signalCode).toBe("SIGKILL");
+
+    if (process.platform === "win32") {
+      expect(child.exitCode).toBe(1);
+    } else {
+      expect(child.signalCode).toBe("SIGKILL");
+    }
   });
 
   it("process.kill(2) throws on invalid input", async () => {
@@ -498,13 +548,28 @@ for (const stub of emptyArrayStubs) {
 }
 
 it("dlopen args parsing", () => {
-  expect(() => process.dlopen({ module: "42" }, "/tmp/not-found.so")).toThrow();
-  expect(() => process.dlopen({ module: 42 }, "/tmp/not-found.so")).toThrow();
-  expect(() => process.dlopen({ module: { exports: "42" } }, "/tmp/not-found.so")).toThrow();
-  expect(() => process.dlopen({ module: { exports: 42 } }, "/tmp/not-found.so")).toThrow();
-  expect(() => process.dlopen({ module: Symbol() }, "/tmp/not-found.so")).toThrow();
-  expect(() => process.dlopen({ module: { exports: Symbol("123") } }, "/tmp/not-found.so")).toThrow();
+  const notFound = join(tmpdirSync(), "not-found.so");
+  expect(() => process.dlopen({ module: "42" }, notFound)).toThrow();
+  expect(() => process.dlopen({ module: 42 }, notFound)).toThrow();
+  expect(() => process.dlopen({ module: { exports: "42" } }, notFound)).toThrow();
+  expect(() => process.dlopen({ module: { exports: 42 } }, notFound)).toThrow();
+  expect(() => process.dlopen({ module: Symbol() }, notFound)).toThrow();
+  expect(() => process.dlopen({ module: { exports: Symbol("123") } }, notFound)).toThrow();
   expect(() => process.dlopen({ module: { exports: Symbol("123") } }, Symbol("badddd"))).toThrow();
+});
+
+it("dlopen accepts file: URLs", () => {
+  const mod = { exports: {} };
+  try {
+    process.dlopen(mod, import.meta.url);
+    throw "Expected error";
+  } catch (e) {
+    expect(e.message).not.toContain("file:");
+  }
+
+  expect(() => process.dlopen(mod, "file://asd[kasd[po@[p1o23]1po!-10923-095-@$@8123=-9123=-0==][pc;!")).toThrow(
+    "invalid file: URL passed to dlopen",
+  );
 });
 
 it("process.constrainedMemory()", () => {
@@ -524,4 +589,69 @@ it("process.report", () => {
 
 it("process.exit with jsDoubleNumber that is an integer", () => {
   expect([join(import.meta.dir, "./process-exit-decimal-fixture.js")]).toRun();
+});
+
+if (isWindows) {
+  it("ownKeys trap windows process.env", () => {
+    expect(() => Object.keys(process.env)).not.toThrow();
+    expect(() => Object.getOwnPropertyDescriptors(process.env)).not.toThrow();
+  });
+}
+
+it("catches exceptions with process.setUncaughtExceptionCaptureCallback", async () => {
+  const proc = Bun.spawn([bunExe(), join(import.meta.dir, "process-uncaughtExceptionCaptureCallback.js")]);
+  expect(await proc.exited).toBe(42);
+});
+
+it("catches exceptions with process.on('uncaughtException', fn)", async () => {
+  const proc = Bun.spawn([bunExe(), join(import.meta.dir, "process-onUncaughtException.js")]);
+  expect(await proc.exited).toBe(42);
+});
+
+it("catches exceptions with process.on('uncaughtException', fn) from setTimeout", async () => {
+  const proc = Bun.spawn([bunExe(), join(import.meta.dir, "process-onUncaughtExceptionSetTimeout.js")]);
+  expect(await proc.exited).toBe(42);
+});
+
+it("catches exceptions with process.on('unhandledRejection', fn)", async () => {
+  const proc = Bun.spawn([bunExe(), join(import.meta.dir, "process-onUnhandledRejection.js")]);
+  expect(await proc.exited).toBe(42);
+});
+
+it("aborts when the uncaughtException handler throws", async () => {
+  const proc = Bun.spawn([bunExe(), join(import.meta.dir, "process-onUncaughtExceptionAbort.js")], {
+    stderr: "pipe",
+  });
+  expect(await proc.exited).toBe(1);
+  expect(await new Response(proc.stderr).text()).toContain("bar");
+});
+
+it("aborts when the uncaughtExceptionCaptureCallback throws", async () => {
+  const proc = Bun.spawn([bunExe(), join(import.meta.dir, "process-uncaughtExceptionCaptureCallbackAbort.js")], {
+    stderr: "pipe",
+  });
+  expect(await proc.exited).toBe(1);
+  expect(await new Response(proc.stderr).text()).toContain("bar");
+});
+
+it("process.hasUncaughtExceptionCaptureCallback", () => {
+  process.setUncaughtExceptionCaptureCallback(null);
+  expect(process.hasUncaughtExceptionCaptureCallback()).toBe(false);
+  process.setUncaughtExceptionCaptureCallback(() => {});
+  expect(process.hasUncaughtExceptionCaptureCallback()).toBe(true);
+  process.setUncaughtExceptionCaptureCallback(null);
+});
+
+it("process.execArgv", async () => {
+  const fixtures = [
+    ["index.ts --bun -a -b -c", [], ["--bun", "-a", "-b", "-c"]],
+    ["--bun index.ts index.ts", ["--bun"], ["index.ts"]],
+    ["run -e bruh -b index.ts foo -a -b -c", ["-e", "bruh", "-b"], ["foo", "-a", "-b", "-c"]],
+  ];
+
+  for (const [cmd, execArgv, argv] of fixtures) {
+    const replacedCmd = cmd.replace("index.ts", Bun.$.escape(join(__dirname, "print-process-execArgv.js")));
+    const result = await Bun.$`${bunExe()} ${{ raw: replacedCmd }}`.json();
+    expect(result, `bun ${cmd}`).toEqual({ execArgv, argv });
+  }
 });

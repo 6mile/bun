@@ -45,33 +45,149 @@ pub fn formatUTF16Type(comptime Slice: type, slice_: Slice, writer: anytype) !vo
     }
 }
 
-pub fn formatUTF16(slice_: []align(1) const u16, writer: anytype) !void {
-    return formatUTF16Type([]align(1) const u16, slice_, writer);
+pub fn formatUTF16TypeWithPathOptions(comptime Slice: type, slice_: Slice, writer: anytype, opts: PathFormatOptions) !void {
+    var chunk = getSharedBuffer();
+
+    // Defensively ensure recursion doesn't cause the buffer to be overwritten in-place
+    shared_temp_buffer_ptr = null;
+    defer {
+        if (shared_temp_buffer_ptr) |existing| {
+            if (existing != chunk.ptr) {
+                bun.default_allocator.destroy(@as(*SharedTempBuffer, @ptrCast(chunk.ptr)));
+            }
+        } else {
+            shared_temp_buffer_ptr = @ptrCast(chunk.ptr);
+        }
+    }
+
+    var slice = slice_;
+
+    while (slice.len > 0) {
+        const result = strings.copyUTF16IntoUTF8(chunk, Slice, slice, true);
+        if (result.read == 0 or result.written == 0)
+            break;
+
+        const to_write = chunk[0..result.written];
+        if (!opts.escape_backslashes and opts.path_sep == .any) {
+            try writer.writeAll(to_write);
+        } else {
+            var ptr = to_write;
+            while (strings.indexOfAny(ptr, "\\/")) |i| {
+                const sep = switch (opts.path_sep) {
+                    .windows => '\\',
+                    .posix => '/',
+                    .auto => std.fs.path.sep,
+                    .any => ptr[i],
+                };
+                try writer.writeAll(ptr[0..i]);
+                try writer.writeByte(sep);
+                if (opts.escape_backslashes and sep == '\\') {
+                    try writer.writeByte(sep);
+                }
+
+                ptr = ptr[i + 1 ..];
+            }
+            try writer.writeAll(ptr);
+        }
+        slice = slice[result.read..];
+    }
+}
+
+pub inline fn utf16(slice_: []const u16) FormatUTF16 {
+    return FormatUTF16{ .buf = slice_ };
 }
 
 pub const FormatUTF16 = struct {
     buf: []const u16,
-    pub fn format(self: @This(), comptime _: []const u8, opts: anytype, writer: anytype) !void {
-        _ = opts;
-        try formatUTF16Type([]const u16, self.buf, writer);
+    path_fmt_opts: ?PathFormatOptions = null,
+    pub fn format(self: @This(), comptime _: []const u8, _: anytype, writer: anytype) !void {
+        if (self.path_fmt_opts) |opts| {
+            try formatUTF16TypeWithPathOptions([]const u16, self.buf, writer, opts);
+        } else {
+            try formatUTF16Type([]const u16, self.buf, writer);
+        }
     }
 };
 
 pub const FormatUTF8 = struct {
     buf: []const u8,
+    path_fmt_opts: ?PathFormatOptions = null,
     pub fn format(self: @This(), comptime _: []const u8, _: anytype, writer: anytype) !void {
+        if (self.path_fmt_opts) |opts| {
+            if (opts.path_sep == .any and opts.escape_backslashes == false) {
+                try writer.writeAll(self.buf);
+                return;
+            }
+
+            var ptr = self.buf;
+            while (strings.indexOfAny(ptr, "\\/")) |i| {
+                const sep = switch (opts.path_sep) {
+                    .windows => '\\',
+                    .posix => '/',
+                    .auto => std.fs.path.sep,
+                    .any => ptr[i],
+                };
+                try writer.writeAll(ptr[0..i]);
+                try writer.writeByte(sep);
+                if (opts.escape_backslashes and sep == '\\') {
+                    try writer.writeByte(sep);
+                }
+                ptr = ptr[i + 1 ..];
+            }
+
+            try writer.writeAll(ptr);
+            return;
+        }
+
         try writer.writeAll(self.buf);
     }
 };
 
-pub fn fmtUTF16(buf: []const u16) FormatUTF16 {
-    return FormatUTF16{ .buf = buf };
-}
+pub const PathFormatOptions = struct {
+    // The path separator used when formatting the path.
+    path_sep: Sep = .any,
+
+    /// Any backslashes are escaped, including backslashes
+    /// added through `path_sep`.
+    escape_backslashes: bool = false,
+
+    pub const Sep = enum {
+        /// Keep paths separators as is.
+        any,
+        /// Replace all path separators with the current platform path separator.
+        auto,
+        /// Replace all path separators with `/`.
+        posix,
+        /// Replace all path separators with `\`.
+        windows,
+    };
+};
 
 pub const FormatOSPath = if (Environment.isWindows) FormatUTF16 else FormatUTF8;
 
-pub fn fmtOSPath(buf: bun.OSPathSlice) FormatOSPath {
-    return FormatOSPath{ .buf = buf };
+pub fn fmtOSPath(buf: bun.OSPathSlice, options: PathFormatOptions) FormatOSPath {
+    return FormatOSPath{
+        .buf = buf,
+        .path_fmt_opts = options,
+    };
+}
+
+pub fn fmtPath(
+    comptime T: type,
+    path: []const T,
+    options: PathFormatOptions,
+) if (T == u8) FormatUTF8 else FormatUTF16 {
+    if (T == u8) {
+        return FormatUTF8{
+            .buf = path,
+            .path_fmt_opts = options,
+        };
+    }
+
+    return FormatUTF16{
+        .buf = path,
+        .path_fmt_opts = options,
+    };
 }
 
 pub fn formatLatin1(slice_: []const u8, writer: anytype) !void {
@@ -115,6 +231,7 @@ pub const URLFormatter = struct {
         http,
         https,
         unix,
+        abstract,
     };
 
     pub fn format(this: URLFormatter, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -122,6 +239,7 @@ pub const URLFormatter = struct {
             .http => "http",
             .https => "https",
             .unix => "unix",
+            .abstract => "abstract",
         }});
 
         if (this.hostname) |hostname| {
@@ -826,6 +944,35 @@ pub const QuickAndDirtyJavaScriptSyntaxHighlighter = struct {
             }
         }
     }
+
+    /// Function for testing in highlighter.test.ts
+    pub fn jsFunctionSyntaxHighlight(globalThis: *bun.JSC.JSGlobalObject, callframe: *bun.JSC.CallFrame) callconv(bun.JSC.conv) bun.JSC.JSValue {
+        const args = callframe.arguments(1);
+        if (args.len < 1) {
+            globalThis.throwNotEnoughArguments("code", 1, 0);
+        }
+
+        const code = args.ptr[0].toSliceOrNull(globalThis) orelse return .zero;
+        defer code.deinit();
+        var buffer = bun.MutableString.initEmpty(bun.default_allocator);
+        defer buffer.deinit();
+        var writer = buffer.bufferedWriter();
+        var formatter = bun.fmt.fmtJavaScript(code.slice(), true);
+        formatter.limited = false;
+        std.fmt.format(writer.writer(), "{}", .{formatter}) catch |err| {
+            globalThis.throwError(err, "Error formatting code");
+            return .zero;
+        };
+
+        writer.flush() catch |err| {
+            globalThis.throwError(err, "Error formatting code");
+            return .zero;
+        };
+
+        var str = bun.String.createUTF8(buffer.list.items);
+        defer str.deref();
+        return str.toJS(globalThis);
+    }
 };
 
 pub fn quote(self: string) bun.fmt.QuotedFormatter {
@@ -931,6 +1078,7 @@ pub fn fastDigitCount(x: u64) u64 {
 
 pub const SizeFormatter = struct {
     value: usize = 0,
+
     pub fn format(self: SizeFormatter, comptime _: []const u8, opts: fmt.FormatOptions, writer: anytype) !void {
         const math = std.math;
         const value = self.value;
@@ -950,12 +1098,12 @@ pub const SizeFormatter = struct {
         const suffix = mags_si[magnitude];
 
         if (suffix == ' ') {
-            try fmt.formatFloatDecimal(new_value / 1000.0, .{ .precision = 2 }, writer);
-            return writer.writeAll(" KB");
-        } else {
-            try fmt.formatFloatDecimal(new_value, .{ .precision = if (std.math.approxEqAbs(f64, new_value, @trunc(new_value), 0.100)) @as(usize, 1) else @as(usize, 2) }, writer);
+            try writer.print("{d:.2} KB", .{new_value / 1000.0});
+            return;
         }
-        return writer.writeAll(&[_]u8{ ' ', suffix, 'B' });
+        const precision: usize = if (std.math.approxEqAbs(f64, new_value, @trunc(new_value), 0.100)) 1 else 2;
+        try fmt.formatType(new_value, "d", .{ .precision = precision }, writer, 0);
+        try writer.writeAll(&.{ ' ', suffix, 'B' });
     }
 };
 
@@ -964,7 +1112,7 @@ pub fn size(value: anytype) SizeFormatter {
         f64, f32, f128 => SizeFormatter{
             .value = @as(u64, @intFromFloat(value)),
         },
-        else => SizeFormatter{ .value = @as(u64, @intCast(value)) },
+        else => SizeFormatter{ .value = value },
     };
 }
 
@@ -1105,4 +1253,73 @@ fn formatDurationOneDecimal(data: FormatDurationData, comptime _: []const u8, op
 pub fn fmtDurationOneDecimal(ns: u64) std.fmt.Formatter(formatDurationOneDecimal) {
     return .{ .data = FormatDurationData{ .ns = ns } };
 }
-// };
+
+pub fn fmtSlice(data: anytype, comptime delim: []const u8) FormatSlice(@TypeOf(data), delim) {
+    return .{ .slice = data };
+}
+
+fn FormatSlice(comptime T: type, comptime delim: []const u8) type {
+    return struct {
+        slice: T,
+
+        pub fn format(self: @This(), comptime format_str: []const u8, _: fmt.FormatOptions, writer: anytype) !void {
+            if (self.slice.len == 0) return;
+            const f = "{" ++ format_str ++ "}";
+            try writer.print(f, .{self.slice[0]});
+            for (self.slice[1..]) |item| {
+                if (delim.len > 0) try writer.writeAll(delim);
+                try writer.print(f, .{item});
+            }
+        }
+    };
+}
+
+/// Uses WebKit's double formatter
+pub fn fmtDouble(number: f64) FormatDouble {
+    return .{ .number = number };
+}
+
+pub const FormatDouble = struct {
+    number: f64,
+
+    extern fn WTF__dtoa(buf_124_bytes: *[124]u8, number: f64) void;
+
+    pub fn dtoa(buf: *[124]u8, number: f64) []const u8 {
+        WTF__dtoa(buf, number);
+        return bun.sliceTo(buf, 0);
+    }
+
+    pub fn dtoaWithNegativeZero(buf: *[124]u8, number: f64) []const u8 {
+        if (std.math.isNegativeZero(number)) {
+            return "-0";
+        }
+
+        WTF__dtoa(buf, number);
+        return bun.sliceTo(buf, 0);
+    }
+
+    pub fn format(self: @This(), comptime _: []const u8, _: fmt.FormatOptions, writer: anytype) !void {
+        var buf: [124]u8 = undefined;
+        const slice = dtoa(&buf, self.number);
+        try writer.writeAll(slice);
+    }
+};
+
+pub fn nullableFallback(value: anytype, null_fallback: []const u8) NullableFallback(@TypeOf(value)) {
+    return .{ .value = value, .null_fallback = null_fallback };
+}
+
+pub fn NullableFallback(comptime T: type) type {
+    return struct {
+        value: T,
+        null_fallback: []const u8,
+
+        pub fn format(self: @This(), comptime template: []const u8, opts: fmt.FormatOptions, writer: anytype) !void {
+            if (self.value) |value| {
+                try std.fmt.formatType(value, template, opts, writer, 4);
+            } else {
+                try writer.writeAll(self.null_fallback);
+            }
+        }
+    };
+}

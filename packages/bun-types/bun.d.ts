@@ -15,7 +15,7 @@
  */
 declare module "bun" {
   import type { Encoding as CryptoEncoding } from "crypto";
-
+  import type { CipherNameAndProtocol, EphemeralKeyInfo, PeerCertificate } from "tls";
   interface Env {
     NODE_ENV?: string;
     /**
@@ -43,19 +43,138 @@ declare module "bun" {
    *
    * @param {string} command The name of the executable or script
    * @param {string} options.PATH Overrides the PATH environment variable
-   * @param {string} options.cwd Limits the search to a particular directory in which to searc
+   * @param {string} options.cwd When given a relative path, use this path to join it.
    */
   function which(command: string, options?: { PATH?: string; cwd?: string }): string | null;
+
+  /**
+   * Get the column count of a string as it would be displayed in a terminal.
+   * Supports ANSI escape codes, emoji, and wide characters.
+   *
+   * This is useful for:
+   * - Aligning text in a terminal
+   * - Quickly checking if a string contains ANSI escape codes
+   * - Measuring the width of a string in a terminal
+   *
+   * This API is designed to match the popular "string-width" package, so that
+   * existing code can be easily ported to Bun and vice versa.
+   *
+   * @returns The width of the string in columns
+   *
+   * ## Examples
+   * @example
+   * ```ts
+   * import { stringWidth } from "bun";
+   *
+   * console.log(stringWidth("abc")); // 3
+   * console.log(stringWidth("👩‍👩‍👧‍👦")); // 1
+   * console.log(stringWidth("\u001b[31mhello\u001b[39m")); // 5
+   * console.log(stringWidth("\u001b[31mhello\u001b[39m", { countAnsiEscapeCodes: false })); // 5
+   * console.log(stringWidth("\u001b[31mhello\u001b[39m", { countAnsiEscapeCodes: true })); // 13
+   * ```
+   *
+   */
+  function stringWidth(
+    /**
+     * The string to measure
+     */
+    input: string,
+    options?: {
+      /**
+       * If `true`, count ANSI escape codes as part of the string width. If `false`, ANSI escape codes are ignored when calculating the string width.
+       *
+       * @default false
+       */
+      countAnsiEscapeCodes?: boolean;
+      /**
+       * When it's ambiugous and `true`, count emoji as 1 characters wide. If `false`, emoji are counted as 2 character wide.
+       *
+       * @default true
+       */
+      ambiguousIsNarrow?: boolean;
+    },
+  ): number;
 
   export type ShellFunction = (input: Uint8Array) => Uint8Array;
 
   export type ShellExpression =
+    | { toString(): string }
+    | Array<ShellExpression>
     | string
     | { raw: string }
     | Subprocess
     | SpawnOptions.Readable
     | SpawnOptions.Writable
     | ReadableStream;
+
+  class ShellError extends Error implements ShellOutput {
+    readonly stdout: Buffer;
+    readonly stderr: Buffer;
+    readonly exitCode: number;
+
+    /**
+     * Read from stdout as a string
+     *
+     * @param encoding - The encoding to use when decoding the output
+     * @returns Stdout as a string with the given encoding
+     * @example
+     *
+     * ## Read as UTF-8 string
+     *
+     * ```ts
+     * const output = await $`echo hello`;
+     * console.log(output.text()); // "hello\n"
+     * ```
+     *
+     * ## Read as base64 string
+     *
+     * ```ts
+     * const output = await $`echo ${atob("hello")}`;
+     * console.log(output.text("base64")); // "hello\n"
+     * ```
+     *
+     */
+    text(encoding?: BufferEncoding): string;
+
+    /**
+     * Read from stdout as a JSON object
+     *
+     * @returns Stdout as a JSON object
+     * @example
+     *
+     * ```ts
+     * const output = await $`echo '{"hello": 123}'`;
+     * console.log(output.json()); // { hello: 123 }
+     * ```
+     *
+     */
+    json(): any;
+
+    /**
+     * Read from stdout as an ArrayBuffer
+     *
+     * @returns Stdout as an ArrayBuffer
+     * @example
+     *
+     * ```ts
+     * const output = await $`echo hello`;
+     * console.log(output.arrayBuffer()); // ArrayBuffer { byteLength: 6 }
+     * ```
+     */
+    arrayBuffer(): ArrayBuffer;
+
+    /**
+     * Read from stdout as a Blob
+     *
+     * @returns Stdout as a blob
+     * @example
+     * ```ts
+     * const output = await $`echo hello`;
+     * console.log(output.blob()); // Blob { size: 6, type: "" }
+     * ```
+     */
+    blob(): Blob;
+  }
 
   class ShellPromise extends Promise<ShellOutput> {
     get stdin(): WritableStream;
@@ -156,6 +275,20 @@ declare module "bun" {
      * ```
      */
     blob(): Promise<Blob>;
+
+    /**
+     * Configure the shell to not throw an exception on non-zero exit codes. Throwing can be re-enabled with `.throws(true)`.
+     *
+     * By default, the shell with throw an exception on commands which return non-zero exit codes.
+     */
+    nothrow(): this;
+
+    /**
+     * Configure whether or not the shell should throw an exception on non-zero exit codes.
+     *
+     * By default, this is configured to `true`.
+     */
+    throws(shouldThrow: boolean): this;
   }
 
   interface ShellConstructor {
@@ -207,6 +340,16 @@ declare module "bun" {
      */
     cwd(newCwd?: string): this;
 
+    /**
+     * Configure the shell to not throw an exception on non-zero exit codes.
+     */
+    nothrow(): this;
+
+    /**
+     * Configure whether or not the shell should throw an exception on non-zero exit codes.
+     */
+    throws(shouldThrow: boolean): this;
+
     readonly ShellPromise: typeof ShellPromise;
     readonly Shell: ShellConstructor;
   }
@@ -215,6 +358,82 @@ declare module "bun" {
     readonly stdout: Buffer;
     readonly stderr: Buffer;
     readonly exitCode: number;
+
+    /**
+     * Read from stdout as a string
+     *
+     * @param encoding - The encoding to use when decoding the output
+     * @returns Stdout as a string with the given encoding
+     * @example
+     *
+     * ## Read as UTF-8 string
+     *
+     * ```ts
+     * const output = await $`echo hello`;
+     * console.log(output.text()); // "hello\n"
+     * ```
+     *
+     * ## Read as base64 string
+     *
+     * ```ts
+     * const output = await $`echo ${atob("hello")}`;
+     * console.log(output.text("base64")); // "hello\n"
+     * ```
+     *
+     */
+    text(encoding?: BufferEncoding): string;
+
+    /**
+     * Read from stdout as a JSON object
+     *
+     * @returns Stdout as a JSON object
+     * @example
+     *
+     * ```ts
+     * const output = await $`echo '{"hello": 123}'`;
+     * console.log(output.json()); // { hello: 123 }
+     * ```
+     *
+     */
+    json(): any;
+
+    /**
+     * Read from stdout as an ArrayBuffer
+     *
+     * @returns Stdout as an ArrayBuffer
+     * @example
+     *
+     * ```ts
+     * const output = await $`echo hello`;
+     * console.log(output.arrayBuffer()); // ArrayBuffer { byteLength: 6 }
+     * ```
+     */
+    arrayBuffer(): ArrayBuffer;
+
+    /**
+     * Read from stdout as an Uint8Array
+     *
+     * @returns Stdout as an Uint8Array
+     * @example
+     *
+     * ```ts
+     * const output = await $`echo hello`;
+     * console.log(output.bytes()); // Uint8Array { byteLength: 6 }
+     * ```
+     */
+    bytes(): Uint8Array;
+
+    /**
+     * Read from stdout as a Blob
+     *
+     * @returns Stdout as a blob
+     * @example
+     * ```ts
+     * const output = await $`echo hello`;
+     * console.log(output.blob()); // Blob { size: 6, type: "" }
+     * ```
+     */
+    blob(): Blob;
   }
 
   export const $: Shell;
@@ -482,7 +701,17 @@ declare module "bun" {
    * This function is faster because it uses uninitialized memory when copying. Since the entire
    * length of the buffer is known, it is safe to use uninitialized memory.
    */
-  function concatArrayBuffers(buffers: Array<ArrayBufferView | ArrayBufferLike>): ArrayBuffer;
+  function concatArrayBuffers(buffers: Array<ArrayBufferView | ArrayBufferLike>, maxLength?: number): ArrayBuffer;
+  function concatArrayBuffers(
+    buffers: Array<ArrayBufferView | ArrayBufferLike>,
+    maxLength: number,
+    asUint8Array: false,
+  ): ArrayBuffer;
+  function concatArrayBuffers(
+    buffers: Array<ArrayBufferView | ArrayBufferLike>,
+    maxLength: number,
+    asUint8Array: true,
+  ): Uint8Array;
 
   /**
    * Consume all data from a {@link ReadableStream} until it closes or errors.
@@ -498,6 +727,21 @@ declare module "bun" {
   function readableStreamToArrayBuffer(
     stream: ReadableStream<ArrayBufferView | ArrayBufferLike>,
   ): Promise<ArrayBuffer> | ArrayBuffer;
+
+  /**
+   * Consume all data from a {@link ReadableStream} until it closes or errors.
+   *
+   * Concatenate the chunks into a single {@link ArrayBuffer}.
+   *
+   * Each chunk must be a TypedArray or an ArrayBuffer. If you need to support
+   * chunks of different types, consider {@link readableStreamToBlob}
+   *
+   * @param stream The stream to consume.
+   * @returns A promise that resolves with the concatenated chunks or the concatenated chunks as a {@link Uint8Array}.
+   */
+  function readableStreamToBytes(
+    stream: ReadableStream<ArrayBufferView | ArrayBufferLike>,
+  ): Promise<Uint8Array> | Uint8Array;
 
   /**
    * Consume all data from a {@link ReadableStream} until it closes or errors.
@@ -623,7 +867,7 @@ declare module "bun" {
    * console.log(path); // "/foo/bar.txt"
    * ```
    */
-  function fileURLToPath(url: URL): string;
+  function fileURLToPath(url: URL | string): string;
 
   /**
    * Fast incremental writer that becomes an `ArrayBuffer` on end().
@@ -754,6 +998,41 @@ declare module "bun" {
         backend?: "libc" | "c-ares" | "system" | "getaddrinfo";
       },
     ): Promise<DNSLookup[]>;
+
+    /**
+     *
+     * **Experimental API**
+     *
+     * Prefetch a hostname.
+     *
+     * This will be used by fetch() and Bun.connect() to avoid DNS lookups.
+     *
+     * @param hostname The hostname to prefetch
+     *
+     * @example
+     * ```js
+     * import { dns } from 'bun';
+     * dns.prefetch('example.com');
+     * // ... something expensive
+     * await fetch('https://example.com');
+     * ```
+     */
+    prefetch(hostname: string): void;
+
+    /**
+     * **Experimental API**
+     */
+    getCacheStats(): {
+      /**
+       * The number of times a cached DNS entry that was already resolved was used.
+       */
+      cacheHitsCompleted: number;
+      cacheHitsInflight: number;
+      cacheMisses: number;
+      size: number;
+      errors: number;
+      totalCount: number;
+    };
   };
 
   interface DNSLookup {
@@ -1241,7 +1520,15 @@ declare module "bun" {
     define?: Record<string, string>;
     // origin?: string; // e.g. http://mydomain.com
     loader?: { [k in string]: Loader };
-    sourcemap?: "none" | "inline" | "external"; // default: "none"
+    sourcemap?: "none" | "linked" | "inline" | "external"; // default: "none", true -> "inline"
+    /**
+     * package.json `exports` conditions used when resolving imports
+     *
+     * Equivalent to `--conditions` in `bun build` or `bun run`.
+     *
+     * https://nodejs.org/api/packages.html#exports
+     */
+    conditions?: Array<string> | string;
     minify?:
       | boolean
       | {
@@ -1831,6 +2118,7 @@ declare module "bun" {
    *     return new Response("Hello World");
    *  },
    * });
+   * ```
    */
   interface WebSocketHandler<T = undefined> {
     /**
@@ -2199,7 +2487,7 @@ declare module "bun" {
     extends WebSocketServeOptions<WebSocketDataType>,
       TLSOptions {
     unix?: never;
-    tls?: TLSOptions;
+    tls?: TLSOptions | TLSOptions[];
   }
   interface UnixTLSWebSocketServeOptions<WebSocketDataType = undefined>
     extends UnixWebSocketServeOptions<WebSocketDataType>,
@@ -2209,7 +2497,7 @@ declare module "bun" {
      * (Cannot be used with hostname+port)
      */
     unix: string;
-    tls?: TLSOptions;
+    tls?: TLSOptions | TLSOptions[];
   }
   interface ErrorLike extends Error {
     code?: string;
@@ -2239,6 +2527,19 @@ declare module "bun" {
      * @default false
      */
     lowMemoryMode?: boolean;
+
+    /**
+     * If set to `false`, any certificate is accepted.
+     * Default is `$NODE_TLS_REJECT_UNAUTHORIZED` environment variable, or `true` if it is not set.
+     */
+    rejectUnauthorized?: boolean;
+
+    /**
+     * If set to `true`, the server will request a client certificate.
+     *
+     * Default is `false`.
+     */
+    requestCert?: boolean;
 
     /**
      * Optionally override the trusted CA certificates. Default is to trust
@@ -2278,23 +2579,11 @@ declare module "bun" {
   }
 
   interface TLSServeOptions extends ServeOptions, TLSOptions {
-    /**
-     *  The keys are [SNI](https://en.wikipedia.org/wiki/Server_Name_Indication) hostnames.
-     *  The values are SSL options objects.
-     */
-    serverNames?: Record<string, TLSOptions>;
-
-    tls?: TLSOptions;
+    tls?: TLSOptions | TLSOptions[];
   }
 
   interface UnixTLSServeOptions extends UnixServeOptions, TLSOptions {
-    /**
-     *  The keys are [SNI](https://en.wikipedia.org/wiki/Server_Name_Indication) hostnames.
-     *  The values are SSL options objects.
-     */
-    serverNames?: Record<string, TLSOptions>;
-
-    tls?: TLSOptions;
+    tls?: TLSOptions | TLSOptions[];
   }
 
   interface SocketAddress {
@@ -2323,7 +2612,7 @@ declare module "bun" {
    *
    * Powered by a fork of [uWebSockets](https://github.com/uNetworking/uWebSockets). Thank you @alexhultman.
    */
-  interface Server {
+  interface Server extends Disposable {
     /**
      * Stop listening to prevent new connections from being accepted.
      *
@@ -2472,6 +2761,25 @@ declare module "bun" {
      * ```
      */
     requestIP(request: Request): SocketAddress | null;
+
+    /**
+     * Undo a call to {@link Server.unref}
+     *
+     * If the Server has already been stopped, this does nothing.
+     *
+     * If {@link Server.ref} is called multiple times, this does nothing. Think of it as a boolean toggle.
+     */
+    ref(): void;
+
+    /**
+     * Don't keep the process alive if this server is the only thing left.
+     * Active connections may continue to keep the process alive.
+     *
+     * By default, the server is ref'd.
+     *
+     * To prevent new connections from being accepted, use {@link Server.stop}
+     */
+    unref(): void;
 
     /**
      * How many requests are in-flight right now?
@@ -2660,7 +2968,7 @@ declare module "bun" {
      * Returns 0 if the versions are equal, 1 if `v1` is greater, or -1 if `v2` is greater.
      * Throws an error if either version is invalid.
      */
-    order(v1: StringLike, v2: StringLike): -1 | 0 | 1;
+    order(this: void, v1: StringLike, v2: StringLike): -1 | 0 | 1;
   }
   var semver: Semver;
 
@@ -2758,12 +3066,19 @@ declare module "bun" {
   }
 
   /**
-   * Nanoseconds since Bun.js was started as an integer.
+   * Returns the number of nanoseconds since the process was started.
    *
-   * This uses a high-resolution monotonic system timer.
+   * This function uses a high-resolution monotonic system timer to provide precise time measurements.
+   * In JavaScript, numbers are represented as double-precision floating-point values (IEEE 754),
+   * which can safely represent integers up to 2^53 - 1 (Number.MAX_SAFE_INTEGER).
    *
-   * After 14 weeks of consecutive uptime, this function
-   * wraps
+   * Due to this limitation, while the internal counter may continue beyond this point,
+   * the precision of the returned value will degrade after 14.8 weeks of uptime (when the nanosecond
+   * count exceeds Number.MAX_SAFE_INTEGER). Beyond this point, the function will continue to count but
+   * with reduced precision, which might affect time calculations and comparisons in long-running applications.
+   *
+   * @returns {number} The number of nanoseconds since the process was started, with precise values up to
+   * Number.MAX_SAFE_INTEGER.
    */
   function nanoseconds(): number;
 
@@ -2836,6 +3151,7 @@ declare module "bun" {
 
   type SupportedCryptoAlgorithms =
     | "blake2b256"
+    | "blake2b512"
     | "md4"
     | "md5"
     | "ripemd160"
@@ -2844,7 +3160,15 @@ declare module "bun" {
     | "sha256"
     | "sha384"
     | "sha512"
-    | "sha512-256";
+    | "sha512-224"
+    | "sha512-256"
+    | "sha3-224"
+    | "sha3-256"
+    | "sha3-384"
+    | "sha3-512"
+    | "shake128"
+    | "shake256";
+
   /**
    * Hardware-accelerated cryptographic hash functions
    *
@@ -2892,7 +3216,8 @@ declare module "bun" {
      *
      * @param hashInto `TypedArray` to write the hash into. Faster than creating a new one each time
      */
-    digest(hashInto?: NodeJS.TypedArray): NodeJS.TypedArray;
+    digest(): Buffer;
+    digest(hashInto: NodeJS.TypedArray): NodeJS.TypedArray;
 
     /**
      * Run the hash over the given data
@@ -2901,10 +3226,11 @@ declare module "bun" {
      *
      * @param hashInto `TypedArray` to write the hash into. Faster than creating a new one each time
      */
+    static hash(algorithm: SupportedCryptoAlgorithms, input: Bun.BlobOrStringOrBuffer): Buffer;
     static hash(
       algorithm: SupportedCryptoAlgorithms,
       input: Bun.BlobOrStringOrBuffer,
-      hashInto?: NodeJS.TypedArray,
+      hashInto: NodeJS.TypedArray,
     ): NodeJS.TypedArray;
 
     /**
@@ -3158,26 +3484,26 @@ declare module "bun" {
    * @param options Compression options to use
    * @returns The output buffer with the compressed data
    */
-  function deflateSync(data: Uint8Array, options?: ZlibCompressionOptions): Uint8Array;
+  function deflateSync(data: Uint8Array | string | ArrayBuffer, options?: ZlibCompressionOptions): Uint8Array;
   /**
    * Compresses a chunk of data with `zlib` GZIP algorithm.
    * @param data The buffer of data to compress
    * @param options Compression options to use
    * @returns The output buffer with the compressed data
    */
-  function gzipSync(data: Uint8Array, options?: ZlibCompressionOptions): Uint8Array;
+  function gzipSync(data: Uint8Array | string | ArrayBuffer, options?: ZlibCompressionOptions): Uint8Array;
   /**
    * Decompresses a chunk of data with `zlib` INFLATE algorithm.
    * @param data The buffer of data to decompress
    * @returns The output buffer with the decompressed data
    */
-  function inflateSync(data: Uint8Array): Uint8Array;
+  function inflateSync(data: Uint8Array | string | ArrayBuffer): Uint8Array;
   /**
    * Decompresses a chunk of data with `zlib` GUNZIP algorithm.
    * @param data The buffer of data to decompress
    * @returns The output buffer with the decompressed data
    */
-  function gunzipSync(data: Uint8Array): Uint8Array;
+  function gunzipSync(data: Uint8Array | string | ArrayBuffer): Uint8Array;
 
   type Target =
     /**
@@ -3548,6 +3874,15 @@ declare module "bun" {
     timeout(seconds: number): void;
 
     /**
+     * Forcefully close the socket. The other end may not receive all data, and
+     * the socket will be closed immediately.
+     *
+     * This passes `SO_LINGER` with `l_onoff` set to `1` and `l_linger` set to
+     * `0` and then calls `close(2)`.
+     */
+    terminate(): void;
+
+    /**
      * Shutdown writes to a socket
      *
      * This makes the socket a half-closed socket. It can still receive data.
@@ -3593,6 +3928,181 @@ declare module "bun" {
      * local port connected to the socket
      */
     readonly localPort: number;
+
+    /**
+     * This property is `true` if the peer certificate was signed by one of the CAs
+     * specified when creating the `Socket` instance, otherwise `false`.
+     */
+    readonly authorized: boolean;
+
+    /**
+     * String containing the selected ALPN protocol.
+     * Before a handshake has completed, this value is always null.
+     * When a handshake is completed but not ALPN protocol was selected, socket.alpnProtocol equals false.
+     */
+    readonly alpnProtocol: string | false | null;
+
+    /**
+     * Disables TLS renegotiation for this `Socket` instance. Once called, attempts
+     * to renegotiate will trigger an `error` handler on the `Socket`.
+     *
+     * There is no support for renegotiation as a server. (Attempts by clients will result in a fatal alert so that ClientHello messages cannot be used to flood a server and escape higher-level limits.)
+     */
+    disableRenegotiation(): void;
+
+    /**
+     * Keying material is used for validations to prevent different kind of attacks in
+     * network protocols, for example in the specifications of IEEE 802.1X.
+     *
+     * Example
+     *
+     * ```js
+     * const keyingMaterial = socket.exportKeyingMaterial(
+     *   128,
+     *   'client finished');
+     *
+     * /*
+     *  Example return value of keyingMaterial:
+     *  <Buffer 76 26 af 99 c5 56 8e 42 09 91 ef 9f 93 cb ad 6c 7b 65 f8 53 f1 d8 d9
+     *     12 5a 33 b8 b5 25 df 7b 37 9f e0 e2 4f b8 67 83 a3 2f cd 5d 41 42 4c 91
+     *     74 ef 2c ... 78 more bytes>
+     *
+     * ```
+     *
+     * @param length number of bytes to retrieve from keying material
+     * @param label an application specific label, typically this will be a value from the [IANA Exporter Label
+     * Registry](https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#exporter-labels).
+     * @param context Optionally provide a context.
+     * @return requested bytes of the keying material
+     */
+    exportKeyingMaterial(length: number, label: string, context: Buffer): Buffer;
+
+    /**
+     * Returns the reason why the peer's certificate was not been verified. This
+     * property is set only when `socket.authorized === false`.
+     */
+    getAuthorizationError(): Error | null;
+
+    /**
+     * Returns an object representing the local certificate. The returned object has
+     * some properties corresponding to the fields of the certificate.
+     *
+     * If there is no local certificate, an empty object will be returned. If the
+     * socket has been destroyed, `null` will be returned.
+     */
+    getCertificate(): PeerCertificate | object | null;
+
+    /**
+     * Returns an object containing information on the negotiated cipher suite.
+     *
+     * For example, a TLSv1.2 protocol with AES256-SHA cipher:
+     *
+     * ```json
+     * {
+     *     "name": "AES256-SHA",
+     *     "standardName": "TLS_RSA_WITH_AES_256_CBC_SHA",
+     *     "version": "SSLv3"
+     * }
+     * ```
+     *
+     */
+    getCipher(): CipherNameAndProtocol;
+
+    /**
+     * Returns an object representing the type, name, and size of parameter of
+     * an ephemeral key exchange in `perfect forward secrecy` on a client
+     * connection. It returns an empty object when the key exchange is not
+     * ephemeral. As this is only supported on a client socket; `null` is returned
+     * if called on a server socket. The supported types are `'DH'` and `'ECDH'`. The`name` property is available only when type is `'ECDH'`.
+     *
+     * For example: `{ type: 'ECDH', name: 'prime256v1', size: 256 }`.
+     */
+    getEphemeralKeyInfo(): EphemeralKeyInfo | object | null;
+
+    /**
+     * Returns an object representing the peer's certificate. If the peer does not
+     * provide a certificate, an empty object will be returned. If the socket has been
+     * destroyed, `null` will be returned.
+     *
+     * If the full certificate chain was requested, each certificate will include an`issuerCertificate` property containing an object representing its issuer's
+     * certificate.
+     * @return A certificate object.
+     */
+    getPeerCertificate(): PeerCertificate;
+
+    /**
+     * See [SSL\_get\_shared\_sigalgs](https://www.openssl.org/docs/man1.1.1/man3/SSL_get_shared_sigalgs.html) for more information.
+     * @since v12.11.0
+     * @return List of signature algorithms shared between the server and the client in the order of decreasing preference.
+     */
+    getSharedSigalgs(): string[];
+
+    /**
+     * As the `Finished` messages are message digests of the complete handshake
+     * (with a total of 192 bits for TLS 1.0 and more for SSL 3.0), they can
+     * be used for external authentication procedures when the authentication
+     * provided by SSL/TLS is not desired or is not enough.
+     *
+     * @return The latest `Finished` message that has been sent to the socket as part of a SSL/TLS handshake, or `undefined` if no `Finished` message has been sent yet.
+     */
+    getTLSFinishedMessage(): Buffer | undefined;
+
+    /**
+     * As the `Finished` messages are message digests of the complete handshake
+     * (with a total of 192 bits for TLS 1.0 and more for SSL 3.0), they can
+     * be used for external authentication procedures when the authentication
+     * provided by SSL/TLS is not desired or is not enough.
+     *
+     * @return The latest `Finished` message that is expected or has actually been received from the socket as part of a SSL/TLS handshake, or `undefined` if there is no `Finished` message so
+     * far.
+     */
+    getTLSPeerFinishedMessage(): Buffer | undefined;
+
+    /**
+     * For a client, returns the TLS session ticket if one is available, or`undefined`. For a server, always returns `undefined`.
+     *
+     * It may be useful for debugging.
+     *
+     * See `Session Resumption` for more information.
+     */
+    getTLSTicket(): Buffer | undefined;
+
+    /**
+     * Returns a string containing the negotiated SSL/TLS protocol version of the
+     * current connection. The value `'unknown'` will be returned for connected
+     * sockets that have not completed the handshaking process. The value `null` will
+     * be returned for server sockets or disconnected client sockets.
+     *
+     * Protocol versions are:
+     *
+     * * `'SSLv3'`
+     * * `'TLSv1'`
+     * * `'TLSv1.1'`
+     * * `'TLSv1.2'`
+     * * `'TLSv1.3'`
+     *
+     */
+    getTLSVersion(): string;
+
+    /**
+     * See `Session Resumption` for more information.
+     * @return `true` if the session was reused, `false` otherwise.
+     */
+    isSessionReused(): boolean;
+
+    /**
+     * The `socket.setMaxSendFragment()` method sets the maximum TLS fragment size.
+     * Returns `true` if setting the limit succeeded; `false` otherwise.
+     *
+     * Smaller fragment sizes decrease the buffering latency on the client: larger
+     * fragments are buffered by the TLS layer until the entire fragment is received
+     * and its integrity is verified; large fragments can span multiple roundtrips
+     * and their processing can be delayed due to packet loss or reordering. However,
+     * smaller fragments add extra TLS framing bytes and CPU overhead, which may
+     * decrease overall server throughput.
+     * @param [size=16384] The maximum TLS fragment size. The maximum value is `16384`.
+     */
+    setMaxSendFragment(size: number): boolean;
   }
 
   interface SocketListener<Data = undefined> {
@@ -3736,6 +4246,91 @@ declare module "bun" {
    */
   function listen<Data = undefined>(options: TCPSocketListenOptions<Data>): TCPSocketListener<Data>;
   function listen<Data = undefined>(options: UnixSocketOptions<Data>): UnixSocketListener<Data>;
+
+  namespace udp {
+    type Data = string | ArrayBufferView | ArrayBufferLike;
+
+    export interface SocketHandler<DataBinaryType extends BinaryType> {
+      data?(
+        socket: Socket<DataBinaryType>,
+        data: BinaryTypeList[DataBinaryType],
+        port: number,
+        address: string,
+      ): void | Promise<void>;
+      drain?(socket: Socket<DataBinaryType>): void | Promise<void>;
+      error?(socket: Socket<DataBinaryType>, error: Error): void | Promise<void>;
+    }
+
+    export interface ConnectedSocketHandler<DataBinaryType extends BinaryType> {
+      data?(
+        socket: ConnectedSocket<DataBinaryType>,
+        data: BinaryTypeList[DataBinaryType],
+        port: number,
+        address: string,
+      ): void | Promise<void>;
+      drain?(socket: ConnectedSocket<DataBinaryType>): void | Promise<void>;
+      error?(socket: ConnectedSocket<DataBinaryType>, error: Error): void | Promise<void>;
+    }
+
+    export interface SocketOptions<DataBinaryType extends BinaryType> {
+      hostname?: string;
+      port?: number;
+      binaryType?: DataBinaryType;
+      socket?: SocketHandler<DataBinaryType>;
+    }
+
+    export interface ConnectSocketOptions<DataBinaryType extends BinaryType> {
+      hostname?: string;
+      port?: number;
+      binaryType?: DataBinaryType;
+      socket?: ConnectedSocketHandler<DataBinaryType>;
+      connect: {
+        hostname: string;
+        port: number;
+      };
+    }
+
+    export interface BaseUDPSocket {
+      readonly hostname: string;
+      readonly port: number;
+      readonly address: SocketAddress;
+      readonly binaryType: BinaryType;
+      readonly closed: boolean;
+      ref(): void;
+      unref(): void;
+      close(): void;
+    }
+
+    export interface ConnectedSocket<DataBinaryType extends BinaryType> extends BaseUDPSocket {
+      readonly remoteAddress: SocketAddress;
+      sendMany(packets: readonly Data[]): number;
+      send(data: Data): boolean;
+      reload(handler: ConnectedSocketHandler<DataBinaryType>): void;
+    }
+
+    export interface Socket<DataBinaryType extends BinaryType> extends BaseUDPSocket {
+      sendMany(packets: readonly (Data | string | number)[]): number;
+      send(data: Data, port: number, address: string): boolean;
+      reload(handler: SocketHandler<DataBinaryType>): void;
+    }
+  }
+
+  /**
+   * Create a UDP socket
+   *
+   * @param options The options to use when creating the server
+   * @param options.socket The socket handler to use
+   * @param options.hostname The hostname to listen on
+   * @param options.port The port to listen on
+   * @param options.binaryType The binary type to use for the socket
+   * @param options.connect The hostname and port to connect to
+   */
+  export function udpSocket<DataBinaryType extends BinaryType = "buffer">(
+    options: udp.SocketOptions<DataBinaryType>,
+  ): Promise<udp.Socket<DataBinaryType>>;
+  export function udpSocket<DataBinaryType extends BinaryType = "buffer">(
+    options: udp.ConnectSocketOptions<DataBinaryType>,
+  ): Promise<udp.ConnectedSocket<DataBinaryType>>;
 
   namespace SpawnOptions {
     /**
@@ -3900,24 +4495,49 @@ declare module "bun" {
       ): void;
 
       /**
+       * The serialization format to use for IPC messages. Defaults to `"advanced"`.
+       *
+       * To communicate with Node.js processes, use `"json"`.
+       *
+       * When `ipc` is not specified, this is ignored.
+       */
+      serialization?: "json" | "advanced";
+
+      /**
        * If true, the subprocess will have a hidden window.
        */
-      // windowsHide?: boolean;
+      windowsHide?: boolean;
+
+      /**
+       * If true, no quoting or escaping of arguments is done on Windows.
+       */
+      windowsVerbatimArguments?: boolean;
+
+      /**
+       * Path to the executable to run in the subprocess. This defaults to `cmds[0]`.
+       *
+       * One use-case for this is for applications which wrap other applications or to simulate a symlink.
+       *
+       * @default cmds[0]
+       */
+      argv0?: string;
     }
 
-    type OptionsToSubprocess<Opts extends OptionsObject> = Opts extends OptionsObject<infer In, infer Out, infer Err>
-      ? Subprocess<
-          // "Writable extends In" means "if In === Writable",
-          // aka if true that means the user didn't specify anything
-          Writable extends In ? "ignore" : In,
-          Readable extends Out ? "pipe" : Out,
-          Readable extends Err ? "inherit" : Err
-        >
-      : Subprocess<Writable, Readable, Readable>;
+    type OptionsToSubprocess<Opts extends OptionsObject> =
+      Opts extends OptionsObject<infer In, infer Out, infer Err>
+        ? Subprocess<
+            // "Writable extends In" means "if In === Writable",
+            // aka if true that means the user didn't specify anything
+            Writable extends In ? "ignore" : In,
+            Readable extends Out ? "pipe" : Out,
+            Readable extends Err ? "inherit" : Err
+          >
+        : Subprocess<Writable, Readable, Readable>;
 
-    type OptionsToSyncSubprocess<Opts extends OptionsObject> = Opts extends OptionsObject<any, infer Out, infer Err>
-      ? SyncSubprocess<Readable extends Out ? "pipe" : Out, Readable extends Err ? "pipe" : Err>
-      : SyncSubprocess<Readable, Readable>;
+    type OptionsToSyncSubprocess<Opts extends OptionsObject> =
+      Opts extends OptionsObject<any, infer Out, infer Err>
+        ? SyncSubprocess<Readable extends Out ? "pipe" : Out, Readable extends Err ? "pipe" : Err>
+        : SyncSubprocess<Readable, Readable>;
 
     type ReadableIO = ReadableStream<Uint8Array> | number | undefined;
 
@@ -3954,19 +4574,19 @@ declare module "bun" {
     };
 
     /**
-     * The amount of CPU time used by the process, in nanoseconds.
+     * The amount of CPU time used by the process, in microseconds.
      */
     cpuTime: {
       /**
-       * User CPU time used by the process, in nanoseconds.
+       * User CPU time used by the process, in microseconds.
        */
       user: number;
       /**
-       * System CPU time used by the process, in nanoseconds.
+       * System CPU time used by the process, in microseconds.
        */
       system: number;
       /**
-       * Total CPU time used by the process, in nanoseconds.
+       * Total CPU time used by the process, in microseconds.
        */
       total: number;
     };
@@ -4028,7 +4648,7 @@ declare module "bun" {
     In extends SpawnOptions.Writable = SpawnOptions.Writable,
     Out extends SpawnOptions.Readable = SpawnOptions.Readable,
     Err extends SpawnOptions.Readable = SpawnOptions.Readable,
-  > {
+  > extends AsyncDisposable {
     readonly stdin: SpawnOptions.WritableToIO<In>;
     readonly stdout: SpawnOptions.ReadableToIO<Out>;
     readonly stderr: SpawnOptions.ReadableToIO<Err>;
@@ -4084,7 +4704,7 @@ declare module "bun" {
      * Kill the process
      * @param exitCode The exitCode to send to the process
      */
-    kill(exitCode?: number): void;
+    kill(exitCode?: number | NodeJS.Signals): void;
 
     /**
      * This method will tell Bun to wait for this process to exit after you already
@@ -4144,6 +4764,8 @@ declare module "bun" {
      * Get the resource usage information of the process (max RSS, CPU time, etc)
      */
     resourceUsage: ResourceUsage;
+
+    signalCode?: string;
   }
 
   /**
@@ -4239,6 +4861,8 @@ declare module "bun" {
        * ```
        */
       cmd: string[];
+
+      onExit?: never;
     },
   ): SpawnOptions.OptionsToSyncSubprocess<Opts>;
 
@@ -4413,34 +5037,6 @@ declare module "bun" {
    * This is sort of like readline() except without the IO.
    */
   function indexOfLine(buffer: ArrayBufferView | ArrayBufferLike, offset?: number): number;
-
-  /**
-   * Provides a higher level API for command-line argument parsing than interacting
-   * with `process.argv` directly. Takes a specification for the expected arguments
-   * and returns a structured object with the parsed options and positionals.
-   *
-   * ```js
-   * const args = ['-f', '--bar', 'b'];
-   * const options = {
-   *   foo: {
-   *     type: 'boolean',
-   *     short: 'f',
-   *   },
-   *   bar: {
-   *     type: 'string',
-   *   },
-   * };
-   * const {
-   *   values,
-   *   positionals,
-   * } = Bun.parseArgs({ args, options });
-   * console.log(values, positionals);
-   * // Prints: { foo: true, bar: 'b' } []
-   * ```
-   * @param config Used to provide arguments for parsing and to configure the parser.
-   * @return The parsed command line arguments
-   */
-  const parseArgs: typeof import("util").parseArgs;
 
   interface GlobScanOptions {
     /**

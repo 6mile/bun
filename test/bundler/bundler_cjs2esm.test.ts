@@ -1,8 +1,5 @@
-// @known-failing-on-windows: panic "TODO on Windows"
-import assert from "assert";
-import dedent from "dedent";
-import { itBundled, testForFile } from "./expectBundled";
-var { describe, test, expect } = testForFile(import.meta.path);
+import { itBundled } from "./expectBundled";
+import { describe, expect } from "bun:test";
 
 const fakeReactNodeModules = {
   "/node_modules/react/index.js": /* js */ `

@@ -23,7 +23,7 @@ Bun.serve({
     if (server.upgrade(req)) {
       return; // do not return a Response
     }
-    return new Response("Upgrade failed :(", { status: 500 });
+    return new Response("Upgrade failed", { status: 500 });
   },
   websocket: {}, // handlers
 });
@@ -182,12 +182,12 @@ const server = Bun.serve<{ username: string }>({
     open(ws) {
       const msg = `${ws.data.username} has entered the chat`;
       ws.subscribe("the-group-chat");
-      ws.publish("the-group-chat", msg);
+      server.publish("the-group-chat", msg);
     },
     message(ws, message) {
       // this is a group chat
       // so the server re-broadcasts incoming message to everyone
-      ws.publish("the-group-chat", `${ws.data.username}: ${message}`);
+      server.publish("the-group-chat", `${ws.data.username}: ${message}`);
     },
     close(ws) {
       const msg = `${ws.data.username} has left the chat`;
@@ -321,7 +321,7 @@ namespace Bun {
         message: string | ArrayBuffer | Uint8Array,
       ) => void;
       open?: (ws: ServerWebSocket) => void;
-      close?: (ws: ServerWebSocket) => void;
+      close?: (ws: ServerWebSocket, code: number, reason: string) => void;
       error?: (ws: ServerWebSocket, error: Error) => void;
       drain?: (ws: ServerWebSocket) => void;
 
@@ -356,7 +356,7 @@ type Compressor =
   | `"256KB"`;
 
 interface Server {
-  pendingWebsockets: number;
+  pendingWebSockets: number;
   publish(
     topic: string,
     data: string | ArrayBufferView | ArrayBuffer,

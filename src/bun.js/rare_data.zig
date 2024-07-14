@@ -1,12 +1,12 @@
 const EditorContext = @import("../open.zig").EditorContext;
 const Blob = JSC.WebCore.Blob;
-const default_allocator = @import("root").bun.default_allocator;
-const Output = @import("root").bun.Output;
+const default_allocator = bun.default_allocator;
+const Output = bun.Output;
 const RareData = @This();
 const Syscall = bun.sys;
-const JSC = @import("root").bun.JSC;
+const JSC = bun.JSC;
 const std = @import("std");
-const BoringSSL = @import("root").bun.BoringSSL;
+const BoringSSL = bun.BoringSSL;
 const bun = @import("root").bun;
 const FDImpl = bun.FDImpl;
 const Environment = bun.Environment;
@@ -15,13 +15,15 @@ const UUID = @import("./uuid.zig");
 const Async = bun.Async;
 const StatWatcherScheduler = @import("./node/node_fs_stat_watcher.zig").StatWatcherScheduler;
 const IPC = @import("./ipc.zig");
-const uws = @import("root").bun.uws;
+const uws = bun.uws;
 
 boring_ssl_engine: ?*BoringSSL.ENGINE = null,
 editor_context: EditorContext = EditorContext{},
 stderr_store: ?*Blob.Store = null,
 stdin_store: ?*Blob.Store = null,
 stdout_store: ?*Blob.Store = null,
+
+postgresql_context: JSC.Postgres.PostgresSQLContext = .{},
 
 entropy_cache: ?*EntropyCache = null,
 
@@ -45,6 +47,17 @@ node_fs_stat_watcher_scheduler: ?*StatWatcherScheduler = null,
 listening_sockets_for_watch_mode: std.ArrayListUnmanaged(bun.FileDescriptor) = .{},
 listening_sockets_for_watch_mode_lock: bun.Lock = bun.Lock.init(),
 
+temp_pipe_read_buffer: ?*PipeReadBuffer = null,
+
+const PipeReadBuffer = [256 * 1024]u8;
+
+pub fn pipeReadBuffer(this: *RareData) *PipeReadBuffer {
+    return this.temp_pipe_read_buffer orelse {
+        this.temp_pipe_read_buffer = default_allocator.create(PipeReadBuffer) catch bun.outOfMemory();
+        return this.temp_pipe_read_buffer.?;
+    };
+}
+
 pub fn addListeningSocketForWatchMode(this: *RareData, socket: bun.FileDescriptor) void {
     this.listening_sockets_for_watch_mode_lock.lock();
     defer this.listening_sockets_for_watch_mode_lock.unlock();
@@ -63,6 +76,8 @@ pub fn closeAllListenSocketsForWatchMode(this: *RareData) void {
     this.listening_sockets_for_watch_mode_lock.lock();
     defer this.listening_sockets_for_watch_mode_lock.unlock();
     for (this.listening_sockets_for_watch_mode.items) |socket| {
+        // Prevent TIME_WAIT state
+        Syscall.disableLinger(socket);
         _ = Syscall.close(socket);
     }
     this.listening_sockets_for_watch_mode = .{};
@@ -80,7 +95,7 @@ pub fn mimeTypeFromString(this: *RareData, allocator: std.mem.Allocator, str: []
     if (this.mime_types == null) {
         this.mime_types = bun.http.MimeType.createHashTable(
             allocator,
-        ) catch @panic("Out of memory");
+        ) catch bun.outOfMemory();
     }
 
     return this.mime_types.?.get(str);
@@ -122,12 +137,12 @@ pub const HotMap = struct {
     }
 
     pub fn insert(this: *HotMap, key: []const u8, ptr: anytype) void {
-        const entry = this._map.getOrPut(key) catch @panic("Out of memory");
+        const entry = this._map.getOrPut(key) catch bun.outOfMemory();
         if (entry.found_existing) {
             @panic("HotMap already contains key");
         }
 
-        entry.key_ptr.* = this._map.allocator.dupe(u8, key) catch @panic("Out of memory");
+        entry.key_ptr.* = this._map.allocator.dupe(u8, key) catch bun.outOfMemory();
         entry.value_ptr.* = Entry.init(ptr);
     }
 
@@ -258,8 +273,8 @@ pub fn boringEngine(rare: *RareData) *BoringSSL.ENGINE {
 }
 
 pub fn stderr(rare: *RareData) *Blob.Store {
+    bun.Analytics.Features.@"Bun.stderr" += 1;
     return rare.stderr_store orelse brk: {
-        const store = default_allocator.create(Blob.Store) catch unreachable;
         var mode: bun.Mode = 0;
         const fd = if (Environment.isWindows) FDImpl.fromUV(2).encode() else bun.STDERR_FD;
 
@@ -270,8 +285,8 @@ pub fn stderr(rare: *RareData) *Blob.Store {
             .err => {},
         }
 
-        store.* = Blob.Store{
-            .ref_count = 2,
+        const store = Blob.Store.new(.{
+            .ref_count = std.atomic.Value(u32).init(2),
             .allocator = default_allocator,
             .data = .{
                 .file = Blob.FileStore{
@@ -282,7 +297,7 @@ pub fn stderr(rare: *RareData) *Blob.Store {
                     .mode = mode,
                 },
             },
-        };
+        });
 
         rare.stderr_store = store;
         break :brk store;
@@ -290,8 +305,8 @@ pub fn stderr(rare: *RareData) *Blob.Store {
 }
 
 pub fn stdout(rare: *RareData) *Blob.Store {
+    bun.Analytics.Features.@"Bun.stdout" += 1;
     return rare.stdout_store orelse brk: {
-        const store = default_allocator.create(Blob.Store) catch unreachable;
         var mode: bun.Mode = 0;
         const fd = if (Environment.isWindows) FDImpl.fromUV(1).encode() else bun.STDOUT_FD;
 
@@ -301,8 +316,8 @@ pub fn stdout(rare: *RareData) *Blob.Store {
             },
             .err => {},
         }
-        store.* = Blob.Store{
-            .ref_count = 2,
+        const store = Blob.Store.new(.{
+            .ref_count = std.atomic.Value(u32).init(2),
             .allocator = default_allocator,
             .data = .{
                 .file = Blob.FileStore{
@@ -313,15 +328,15 @@ pub fn stdout(rare: *RareData) *Blob.Store {
                     .mode = mode,
                 },
             },
-        };
+        });
         rare.stdout_store = store;
         break :brk store;
     };
 }
 
 pub fn stdin(rare: *RareData) *Blob.Store {
+    bun.Analytics.Features.@"Bun.stdin" += 1;
     return rare.stdin_store orelse brk: {
-        const store = default_allocator.create(Blob.Store) catch unreachable;
         var mode: bun.Mode = 0;
         const fd = if (Environment.isWindows) FDImpl.fromUV(0).encode() else bun.STDIN_FD;
 
@@ -331,19 +346,19 @@ pub fn stdin(rare: *RareData) *Blob.Store {
             },
             .err => {},
         }
-        store.* = Blob.Store{
+        const store = Blob.Store.new(.{
             .allocator = default_allocator,
-            .ref_count = 2,
+            .ref_count = std.atomic.Value(u32).init(2),
             .data = .{
                 .file = Blob.FileStore{
                     .pathlike = .{
                         .fd = fd,
                     },
-                    .is_atty = std.os.isatty(bun.STDIN_FD.cast()),
+                    .is_atty = if (bun.STDIN_FD.isValid()) std.posix.isatty(bun.STDIN_FD.cast()) else false,
                     .mode = mode,
                 },
             },
-        };
+        });
         rare.stdin_store = store;
         break :brk store;
     };

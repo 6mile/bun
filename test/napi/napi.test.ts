@@ -1,4 +1,3 @@
-// @known-failing-on-windows: 1 failing
 import { it, expect, test, beforeAll, describe } from "bun:test";
 import { bunExe, bunEnv } from "harness";
 import { spawnSync } from "bun";
@@ -8,7 +7,7 @@ describe("napi", () => {
   beforeAll(() => {
     // build gyp
     const install = spawnSync({
-      cmd: ["bun", "install", "--verbose"],
+      cmd: [bunExe(), "install", "--verbose"],
       cwd: join(__dirname, "napi-app"),
       stderr: "inherit",
       env: bunEnv,
@@ -18,24 +17,17 @@ describe("napi", () => {
     if (!install.success) {
       throw new Error("build failed");
     }
-
-    const build = spawnSync({
-      cmd: ["bun", "run", "build"],
-      cwd: join(__dirname, "napi-app"),
-      stderr: "inherit",
-      env: bunEnv,
-      stdout: "inherit",
-      stdin: "inherit",
-    });
-    if (!build.success) {
-      throw new Error("build failed");
-    }
   });
-
   describe("issue_7685", () => {
     it("works", () => {
       const args = [...Array(20).keys()];
       checkSameOutput("test_issue_7685", args);
+    });
+  });
+  describe("issue_11949", () => {
+    it("napi_call_threadsafe_function should accept null", () => {
+      const result = checkSameOutput("test_issue_11949", []);
+      expect(result).toStartWith("data: nullptr");
     });
   });
 
@@ -53,7 +45,7 @@ describe("napi", () => {
 
     it("copies zero char", () => {
       const result = checkSameOutput("test_napi_get_value_string_utf8_with_buffer", ["abcdef", 0]);
-      expect(result).toEndWith("str: ******************************");
+      expect(result).toEndWith("str: *****************************");
     });
 
     it("copies more than given len", () => {
@@ -65,6 +57,11 @@ describe("napi", () => {
       const result = checkSameOutput("test_napi_get_value_string_utf8_with_buffer", ["abcdef", 424242]);
       expect(result).toEndWith("str:");
     });
+  });
+
+  it("#1288", async () => {
+    const result = checkSameOutput("self", []);
+    expect(result).toBe("hello world!");
   });
 });
 

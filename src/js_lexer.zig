@@ -1,5 +1,5 @@
 const std = @import("std");
-const logger = @import("root").bun.logger;
+const logger = bun.logger;
 const tables = @import("js_lexer_tables.zig");
 const build_options = @import("build_options");
 const js_ast = bun.JSAst;
@@ -17,6 +17,7 @@ const default_allocator = bun.default_allocator;
 const C = bun.C;
 const FeatureFlags = @import("feature_flags.zig");
 const JavascriptString = []const u16;
+const Indentation = bun.js_printer.Options.Indentation;
 
 const unicode = std.unicode;
 
@@ -73,9 +74,13 @@ pub const JSONOptions = struct {
 
     /// mark as originally for a macro to enable inlining
     was_originally_macro: bool = false,
+
+    always_decode_escape_sequences: bool = false,
+
+    guess_indentation: bool = false,
 };
 
-pub fn decodeUTF8(bytes: string, allocator: std.mem.Allocator) ![]const u16 {
+pub fn decodeStringLiteralEscapeSequencesToUTF16(bytes: string, allocator: std.mem.Allocator) ![]const u16 {
     var log = logger.Log.init(allocator);
     defer log.deinit();
     const source = logger.Source.initEmptyFile("");
@@ -99,6 +104,8 @@ pub fn NewLexer(
         json_options.ignore_trailing_escape_sequences,
         json_options.json_warn_duplicate_keys,
         json_options.was_originally_macro,
+        json_options.always_decode_escape_sequences,
+        json_options.guess_indentation,
     );
 }
 
@@ -110,6 +117,8 @@ fn NewLexer_(
     comptime json_options_ignore_trailing_escape_sequences: bool,
     comptime json_options_json_warn_duplicate_keys: bool,
     comptime json_options_was_originally_macro: bool,
+    comptime json_options_always_decode_escape_sequences: bool,
+    comptime json_options_guess_indentation: bool,
 ) type {
     const json_options = JSONOptions{
         .is_json = json_options_is_json,
@@ -119,6 +128,8 @@ fn NewLexer_(
         .ignore_trailing_escape_sequences = json_options_ignore_trailing_escape_sequences,
         .json_warn_duplicate_keys = json_options_json_warn_duplicate_keys,
         .was_originally_macro = json_options_was_originally_macro,
+        .always_decode_escape_sequences = json_options_always_decode_escape_sequences,
+        .guess_indentation = json_options_guess_indentation,
     };
     return struct {
         const LexerType = @This();
@@ -183,6 +194,16 @@ fn NewLexer_(
         is_ascii_only: JSONBool = JSONBoolDefault,
         track_comments: bool = false,
         all_comments: std.ArrayList(logger.Range),
+
+        indent_info: if (json_options.guess_indentation)
+            struct {
+                guess: Indentation = .{},
+                first_newline: bool = true,
+            }
+        else
+            void = if (json_options.guess_indentation)
+            .{}
+        else {},
 
         pub fn clone(self: *const LexerType) LexerType {
             return LexerType{
@@ -666,11 +687,17 @@ fn NewLexer_(
         pub const InnerStringLiteral = packed struct { suffix_len: u3, needs_slow_path: bool };
 
         fn parseStringLiteralInnter(lexer: *LexerType, comptime quote: CodePoint) !InnerStringLiteral {
+            const check_for_backslash = comptime is_json and json_options.always_decode_escape_sequences;
             var needs_slow_path = false;
             var suffix_len: u3 = if (comptime quote == 0) 0 else 1;
+            var has_backslash: if (check_for_backslash) bool else void = if (check_for_backslash) false else {};
             stringLiteral: while (true) {
                 switch (lexer.code_point) {
                     '\\' => {
+                        if (comptime check_for_backslash) {
+                            has_backslash = true;
+                        }
+
                         lexer.step();
 
                         // Handle Windows CRLF
@@ -784,6 +811,8 @@ fn NewLexer_(
                 lexer.step();
             }
 
+            if (comptime check_for_backslash) needs_slow_path = needs_slow_path or has_backslash;
+
             return InnerStringLiteral{ .needs_slow_path = needs_slow_path, .suffix_len = suffix_len };
         }
 
@@ -896,18 +925,18 @@ fn NewLexer_(
             i: usize = 0,
 
             pub fn append(fake: *FakeArrayList16, value: u16) !void {
-                std.debug.assert(fake.items.len > fake.i);
+                bun.assert(fake.items.len > fake.i);
                 fake.items[fake.i] = value;
                 fake.i += 1;
             }
 
             pub fn appendAssumeCapacity(fake: *FakeArrayList16, value: u16) void {
-                std.debug.assert(fake.items.len > fake.i);
+                bun.assert(fake.items.len > fake.i);
                 fake.items[fake.i] = value;
                 fake.i += 1;
             }
             pub fn ensureUnusedCapacity(fake: *FakeArrayList16, int: anytype) !void {
-                std.debug.assert(fake.items.len > fake.i + int);
+                bun.assert(fake.items.len > fake.i + int);
             }
         };
         threadlocal var large_escape_sequence_list: std.ArrayList(u16) = undefined;
@@ -1198,8 +1227,36 @@ fn NewLexer_(
                         }
                     },
                     '\r', '\n', 0x2028, 0x2029 => {
-                        lexer.step();
                         lexer.has_newline_before = true;
+
+                        if (comptime json_options.guess_indentation) {
+                            if (lexer.indent_info.first_newline and lexer.code_point == '\n') {
+                                while (lexer.code_point == '\n' or lexer.code_point == '\r') {
+                                    lexer.step();
+                                }
+
+                                if (lexer.code_point != ' ' and lexer.code_point != '\t') {
+                                    // try to get the next one. this handles cases where the file starts
+                                    // with a newline
+                                    continue;
+                                }
+
+                                lexer.indent_info.first_newline = false;
+
+                                const indent_character = lexer.code_point;
+                                var count: usize = 0;
+                                while (lexer.code_point == indent_character) {
+                                    lexer.step();
+                                    count += 1;
+                                }
+
+                                lexer.indent_info.guess.character = if (indent_character == ' ') .space else .tab;
+                                lexer.indent_info.guess.scalar = count;
+                                continue;
+                            }
+                        }
+
+                        lexer.step();
                         continue;
                     },
                     '\t', ' ' => {
@@ -1944,7 +2001,7 @@ fn NewLexer_(
                     if (@reduce(.Max, hashtag + at) == 1) {
                         rest.len = @intFromPtr(end) - @intFromPtr(rest.ptr);
                         if (comptime Environment.allow_assert) {
-                            std.debug.assert(
+                            bun.assert(
                                 strings.containsChar(&@as([strings.ascii_vector_size]u8, vec), '#') or
                                     strings.containsChar(&@as([strings.ascii_vector_size]u8, vec), '@'),
                             );
@@ -2001,7 +2058,7 @@ fn NewLexer_(
             }
 
             if (comptime Environment.allow_assert)
-                std.debug.assert(rest.len == 0 or bun.isSliceInBuffer(rest, text));
+                bun.assert(rest.len == 0 or bun.isSliceInBuffer(rest, text));
 
             while (rest.len > 0) {
                 const c = rest[0];
@@ -2720,7 +2777,7 @@ fn NewLexer_(
             // them. <CR><LF> and <CR> LineTerminatorSequences are normalized to
             // <LF> for both TV and TRV. An explicit EscapeSequence is needed to
             // include a <CR> or <CR><LF> sequence.
-            var bytes = MutableString.initCopy(lexer.allocator, text) catch @panic("Out of memory");
+            var bytes = MutableString.initCopy(lexer.allocator, text) catch bun.outOfMemory();
             var end: usize = 0;
             var i: usize = 0;
             var c: u8 = '0';
@@ -3299,11 +3356,11 @@ fn latin1IdentifierContinueLength(name: []const u8) usize {
             if (std.simd.firstIndexOfValue(@as(Vec, @bitCast(other)), 1)) |first| {
                 if (comptime Environment.allow_assert) {
                     for (vec[0..first]) |c| {
-                        std.debug.assert(isIdentifierContinue(c));
+                        bun.assert(isIdentifierContinue(c));
                     }
 
                     if (vec[first] < 128)
-                        std.debug.assert(!isIdentifierContinue(vec[first]));
+                        bun.assert(!isIdentifierContinue(vec[first]));
                 }
 
                 return @as(usize, first) +
@@ -3392,8 +3449,8 @@ fn skipToInterestingCharacterInMultilineComment(text_: []const u8) ?u32 {
     const V1x16 = strings.AsciiVectorU1;
 
     const text_end_len = text.len & ~(@as(usize, strings.ascii_vector_size) - 1);
-    std.debug.assert(text_end_len % strings.ascii_vector_size == 0);
-    std.debug.assert(text_end_len <= text.len);
+    bun.assert(text_end_len % strings.ascii_vector_size == 0);
+    bun.assert(text_end_len <= text.len);
 
     const text_end_ptr = text.ptr + text_end_len;
 
@@ -3409,8 +3466,8 @@ fn skipToInterestingCharacterInMultilineComment(text_: []const u8) ?u32 {
         if (@reduce(.Max, any_significant) > 0) {
             const bitmask = @as(u16, @bitCast(any_significant));
             const first = @ctz(bitmask);
-            std.debug.assert(first < strings.ascii_vector_size);
-            std.debug.assert(text.ptr[first] == '*' or text.ptr[first] == '\r' or text.ptr[first] == '\n' or text.ptr[first] > 127);
+            bun.assert(first < strings.ascii_vector_size);
+            bun.assert(text.ptr[first] == '*' or text.ptr[first] == '\r' or text.ptr[first] == '\n' or text.ptr[first] > 127);
             return @as(u32, @truncate(first + (@intFromPtr(text.ptr) - @intFromPtr(text_.ptr))));
         }
         text.ptr += strings.ascii_vector_size;
@@ -3437,39 +3494,11 @@ fn indexOfInterestingCharacterInStringLiteral(text_: []const u8, quote: u8) ?usi
         if (@reduce(.Max, any_significant) > 0) {
             const bitmask = @as(u16, @bitCast(any_significant));
             const first = @ctz(bitmask);
-            std.debug.assert(first < strings.ascii_vector_size);
+            bun.assert(first < strings.ascii_vector_size);
             return first + (@intFromPtr(text.ptr) - @intFromPtr(text_.ptr));
         }
         text = text[strings.ascii_vector_size..];
     }
 
     return null;
-}
-
-test "isIdentifier" {
-    const expect = std.testing.expect;
-    try expect(!isIdentifierStart(0x2029));
-    try expect(!isIdentifierStart(0));
-    try expect(!isIdentifierStart(1));
-    try expect(!isIdentifierStart(2));
-    try expect(!isIdentifierStart(3));
-    try expect(!isIdentifierStart(4));
-    try expect(!isIdentifierStart(5));
-    try expect(!isIdentifierStart(6));
-    try expect(!isIdentifierStart(7));
-    try expect(!isIdentifierStart(8));
-    try expect(!isIdentifierStart(9));
-    try expect(!isIdentifierStart(0x2028));
-    try expect(!isIdentifier("\\u2028"));
-    try expect(!isIdentifier("\\u2029"));
-
-    try expect(!isIdentifierContinue(':'));
-    try expect(!isIdentifier("javascript:"));
-
-    try expect(isIdentifier("javascript"));
-
-    try expect(!isIdentifier(":2"));
-    try expect(!isIdentifier("2:"));
-    try expect(isIdentifier("$"));
-    try expect(!isIdentifier("$:"));
 }

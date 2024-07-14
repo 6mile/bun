@@ -76,6 +76,46 @@ describe("mock()", () => {
     expect(fn).toHaveBeenLastCalledWith();
     expect(fn).toHaveBeenCalledWith();
   });
+
+  test("jest.clearAllMocks()", () => {
+    const func = jest.fn(() => 42);
+    expect(func).not.toHaveBeenCalled();
+    expect(func()).toBe(42);
+    expect(func).toHaveBeenCalled();
+
+    jest.clearAllMocks();
+
+    expect(func).not.toHaveBeenCalled();
+    expect(func()).toBe(42);
+    expect(func).toHaveBeenCalled();
+  });
+
+  test("toHaveReturned()", () => {
+    const func = jest.fn(() => "the jedi");
+    expect(func).not.toHaveReturned();
+    func();
+    expect(func).toHaveReturned();
+    expect(func).toHaveReturnedTimes(1);
+    expect(func.mock.calls).toHaveLength(1);
+    expect(func.mock.calls[0]).toBeEmpty();
+    func();
+    expect(func).toHaveReturnedTimes(2);
+    const func2 = jest.fn(() => {
+      throw new Error("the jedi");
+    });
+    expect(func2).not.toHaveReturned();
+    try {
+      func2();
+    } catch (e) {}
+
+    expect(func2).not.toHaveReturned();
+    try {
+      expect(func2).toHaveReturned();
+    } catch (e) {
+      expect(e.message).toContain("Function threw an exception");
+    }
+  });
+
   test("passes this value", () => {
     const fn = jest.fn(function hey() {
       "use strict";
@@ -655,6 +695,13 @@ describe("spyOn", () => {
     expect(() => expect(fn).not.toHaveBeenCalledTimes(1)).toThrow();
     expect(fn.mock.calls).toHaveLength(1);
     expect(fn.mock.calls[0]).toBeEmpty();
+    jest.clearAllMocks();
+    // verify that the spy's history is cleared, but the spy is still intact
+    expect(fn).not.toHaveBeenCalled();
+    expect(fn.mock.calls).toHaveLength(0);
+    expect(obj.original()).toBe(42);
+    expect(fn).toHaveBeenCalled();
+    expect(fn).toHaveBeenCalledTimes(1);
     jest.restoreAllMocks();
     expect(() => expect(obj.original).toHaveBeenCalled()).toThrow();
     expect(fn).not.toHaveBeenCalled();
@@ -714,8 +761,18 @@ describe("spyOn", () => {
       expect(fn).toHaveBeenCalledTimes(1);
       expect(fn.mock.calls).toHaveLength(1);
       expect(fn.mock.calls[0]).toBeEmpty();
+      jest.clearAllMocks();
+      // verify that the spy's history is cleared, but the spy is still intact
+      expect(fn).not.toHaveBeenCalled();
+      expect(fn.mock.calls).toHaveLength(0);
+      expect(obj.original).toBe(42);
+      expect(fn).toHaveBeenCalled();
+      expect(fn).toHaveBeenCalledTimes(1);
       jest.restoreAllMocks();
       expect(() => expect(obj.original).toHaveBeenCalled()).toThrow();
+      expect(fn).not.toHaveBeenCalled();
+      expect(obj.original).toBe(42);
+      expect(fn).not.toHaveBeenCalled();
     });
 
     test("spyOn on object doens't crash if object GC'd", () => {
@@ -744,6 +801,13 @@ describe("spyOn", () => {
       expect(fn).toHaveBeenCalledTimes(1);
       expect(fn.mock.calls).toHaveLength(1);
       expect(fn.mock.calls[0]).toBeEmpty();
+      jest.clearAllMocks();
+      // verify that the spy's history is cleared, but the spy is still intact
+      expect(fn).not.toHaveBeenCalled();
+      expect(fn.mock.calls).toHaveLength(0);
+      expect(obj.original).toBe(42);
+      expect(fn).toHaveBeenCalled();
+      expect(fn).toHaveBeenCalledTimes(1);
       jest.restoreAllMocks();
       expect(() => expect(obj.original).toHaveBeenCalled()).toThrow();
       obj.original;

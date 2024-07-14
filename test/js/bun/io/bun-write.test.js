@@ -1,9 +1,12 @@
 import fs, { mkdirSync } from "fs";
-import { it, expect, describe } from "bun:test";
+import { it, expect, describe, test } from "bun:test";
 import path, { join } from "path";
-import { gcTick, withoutAggressiveGC, bunExe, bunEnv } from "harness";
+import { gcTick, withoutAggressiveGC, bunExe, bunEnv, isWindows } from "harness";
 import { tmpdir } from "os";
 const tmpbase = tmpdir() + path.sep;
+
+const IS_UV_FS_COPYFILE_DISABLED =
+  process.platform === "win32" && process.env.BUN_FEATURE_FLAG_DISABLE_UV_FS_COPYFILE === "1";
 
 it("Bun.write blob", async () => {
   await Bun.write(
@@ -95,7 +98,9 @@ it("Bun.write file not found returns ENOENT, issue#6336", async () => {
     expect.unreachable();
   } catch (exception) {
     expect(exception.code).toBe("ENOENT");
-    expect(exception.path).toBe(dst.name);
+    if (!IS_UV_FS_COPYFILE_DISABLED) {
+      expect(exception.path).toBe(dst.name);
+    }
   }
 
   const src = Bun.file(path.join(tmpdir(), `test-bun-write-${Date.now()}.txt`));
@@ -107,7 +112,9 @@ it("Bun.write file not found returns ENOENT, issue#6336", async () => {
     await gcTick();
   } catch (exception) {
     expect(exception.code).toBe("ENOENT");
-    expect(exception.path).toBe(dst.name);
+    if (!IS_UV_FS_COPYFILE_DISABLED) {
+      expect(exception.path).toBe(dst.name);
+    }
   } finally {
     fs.unlinkSync(src.name);
   }
@@ -194,7 +201,7 @@ it("Bun.file lastModified update", async () => {
   const lastModified0 = file.lastModified;
 
   // sleep some time and write the file again.
-  await Bun.sleep(process.platform === "win32" ? 1000 : 100);
+  await Bun.sleep(isWindows ? 1000 : 100);
   await Bun.write(file, "test text2.");
   const lastModified1 = file.lastModified;
 
@@ -308,6 +315,23 @@ it("Bun.write(Bun.stdout, new TextEncoder().encode('Bun.write STDOUT TEST'))", a
 
 it("Bun.write(Bun.stderr, 'new TextEncoder().encode(Bun.write STDERR TEST'))", async () => {
   expect(await Bun.write(Bun.stderr, new TextEncoder().encode("\nBun.write STDERR TEST\n\n"))).toBe(24);
+});
+
+// These tests pass by not throwing:
+it("Bun.write(Bun.stdout, Bun.file(path))", async () => {
+  await Bun.write(Bun.stdout, Bun.file(path.join(import.meta.dir, "hello-world.txt")));
+});
+
+it("Bun.write(Bun.stderr, Bun.file(path))", async () => {
+  await Bun.write(Bun.stderr, Bun.file(path.join(import.meta.dir, "hello-world.txt")));
+});
+
+it("Bun.file(0) survives GC", async () => {
+  for (let i = 0; i < 10; i++) {
+    let f = Bun.file(0);
+    await gcTick();
+    expect(Bun.inspect(f)).toContain("FileRef (fd: 0)");
+  }
 });
 
 // FLAKY TEST
@@ -471,3 +495,35 @@ describe("ENOENT", () => {
     });
   });
 });
+
+test("timed output should work", async () => {
+  const producer_file = path.join(import.meta.dir, "timed-stderr-output.js");
+
+  const producer = Bun.spawn([bunExe(), "run", producer_file], {
+    stderr: "pipe",
+    stdout: "inherit",
+    stdin: "inherit",
+  });
+
+  let text = "";
+  for await (const chunk of producer.stderr) {
+    text += [...chunk].map(x => String.fromCharCode(x)).join("");
+    await Bun.sleep(1000);
+  }
+  expect(text).toBe("0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n");
+}, 25000);
+
+if (isWindows && !IS_UV_FS_COPYFILE_DISABLED) {
+  it("Bun.write() without uv_fs_copyfile", async () => {
+    const { exited } = Bun.spawn({
+      cmd: [bunExe(), "test", import.meta.path],
+      env: {
+        ...bunEnv,
+        BUN_FEATURE_FLAG_DISABLE_UV_FS_COPYFILE: "1",
+      },
+      stdio: ["inherit", "inherit", "inherit"],
+    });
+
+    expect(await exited).toBe(0);
+  }, 10000);
+}

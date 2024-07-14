@@ -2,7 +2,7 @@ const std = @import("std");
 const bun = @import("root").bun;
 const builtin = @import("builtin");
 const win32 = std.os.windows;
-const os = std.os;
+const posix = std.posix;
 const mem = std.mem;
 const Stat = std.fs.File.Stat;
 const Kind = std.fs.File.Kind;
@@ -818,7 +818,7 @@ pub const SystemErrno = enum(u16) {
         return labels.get(this) orelse null;
     }
 
-    const LabelMap = bun.enums.EnumMap(SystemErrno, []const u8);
+    const LabelMap = std.enums.EnumMap(SystemErrno, []const u8);
     pub const labels: LabelMap = brk: {
         var map: LabelMap = LabelMap.initFull("");
 
@@ -959,7 +959,7 @@ pub const SystemErrno = enum(u16) {
 };
 
 pub const off_t = i64;
-pub fn preallocate_file(_: os.fd_t, _: off_t, _: off_t) !void {}
+pub fn preallocate_file(_: posix.fd_t, _: off_t, _: off_t) !void {}
 
 const uv = @import("./deps/libuv.zig");
 
@@ -1269,31 +1269,36 @@ pub fn renameAtW(
     new_path_w: []const u16,
     replace_if_exists: bool,
 ) Maybe(void) {
-    if (comptime bun.Environment.allow_assert) {
-        // if the directories are the same and the destination path is absolute, the old path name is kept
-        if (old_dir_fd == new_dir_fd) {
-            std.debug.assert(!std.fs.path.isAbsoluteWindowsWTF16(new_path_w));
+    const src_fd = brk: {
+        switch (bun.sys.openFileAtWindows(
+            old_dir_fd,
+            old_path_w,
+            w.SYNCHRONIZE | w.GENERIC_WRITE | w.DELETE | w.FILE_TRAVERSE,
+            w.FILE_OPEN,
+            w.FILE_SYNCHRONOUS_IO_NONALERT | w.FILE_OPEN_REPARSE_POINT,
+        )) {
+            .err => {
+                // retry, wtihout FILE_TRAVERSE flag
+                switch (bun.sys.openFileAtWindows(
+                    old_dir_fd,
+                    old_path_w,
+                    w.SYNCHRONIZE | w.GENERIC_WRITE | w.DELETE,
+                    w.FILE_OPEN,
+                    w.FILE_SYNCHRONOUS_IO_NONALERT | w.FILE_OPEN_REPARSE_POINT,
+                )) {
+                    .err => |err2| return .{ .err = err2 },
+                    .result => |fd| break :brk fd,
+                }
+            },
+            .result => |fd| break :brk fd,
         }
-    }
-    const src_fd = switch (bun.sys.ntCreateFile(
-        old_dir_fd,
-        old_path_w,
-        // access_mask
-        w.SYNCHRONIZE | w.GENERIC_WRITE | w.DELETE,
-        // create disposition
-        w.FILE_OPEN,
-        // create options
-        w.FILE_SYNCHRONOUS_IO_NONALERT | w.FILE_OPEN_REPARSE_POINT,
-    )) {
-        .err => |err| return Maybe(void){ .err = err },
-        .result => |fd| fd,
     };
     defer _ = bun.sys.close(src_fd);
 
     return moveOpenedFileAt(src_fd, new_dir_fd, new_path_w, replace_if_exists);
 }
 
-const log = bun.Output.scoped(.SYS, false);
+const log = bun.sys.syslog;
 
 /// With an open file source_fd, move it into the directory new_dir_fd with the name new_path_w.
 /// Does not close the file descriptor.
@@ -1313,11 +1318,10 @@ pub fn moveOpenedFileAt(
     // supported in order to avoid either (1) using a redundant call that we can know in advance will return
     // STATUS_NOT_SUPPORTED or (2) only setting IGNORE_READONLY_ATTRIBUTE when >= rs5
     // and therefore having different behavior when the Windows version is >= rs1 but < rs5.
-    comptime std.debug.assert(builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs5));
+    comptime bun.assert(builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs5));
 
     if (bun.Environment.allow_assert) {
-        std.debug.assert(std.mem.indexOfScalar(u16, new_file_name, '\\') == null); // Call moveOpenedFileAtLoose
-        std.debug.assert(std.mem.indexOfScalar(u16, new_file_name, '/') == null); // Call moveOpenedFileAtLoose
+        bun.assert(std.mem.indexOfScalar(u16, new_file_name, '/') == null); // Call moveOpenedFileAtLoose
     }
 
     const struct_buf_len = @sizeOf(w.FILE_RENAME_INFORMATION_EX) + (bun.MAX_PATH_BYTES - 1);
@@ -1345,7 +1349,7 @@ pub fn moveOpenedFileAt(
         @intCast(struct_len), // already checked for error.NameTooLong
         .FileRenameInformationEx,
     );
-    log("moveOpenedFileAt({} ->> {} '{}', {s}) = {s}", .{ src_fd, new_dir_fd, std.unicode.fmtUtf16le(new_file_name), if (replace_if_exists) "replace_if_exists" else "no flag", @tagName(rc) });
+    log("moveOpenedFileAt({} ->> {} '{}', {s}) = {s}", .{ src_fd, new_dir_fd, bun.fmt.utf16(new_file_name), if (replace_if_exists) "replace_if_exists" else "no flag", @tagName(rc) });
 
     if (bun.Environment.isDebug) {
         if (rc == .ACCESS_DENIED) {
@@ -1368,7 +1372,7 @@ pub fn moveOpenedFileAtLoose(
     new_path: []const u16,
     replace_if_exists: bool,
 ) Maybe(void) {
-    std.debug.assert(std.mem.indexOfScalar(u16, new_path, '/') == null); // Call bun.strings.toWPathNormalized first
+    bun.assert(std.mem.indexOfScalar(u16, new_path, '/') == null); // Call bun.strings.toWPathNormalized first
 
     const without_leading_dot_slash = if (new_path.len >= 2 and new_path[0] == '.' and new_path[1] == '\\')
         new_path[2..]
@@ -1377,7 +1381,7 @@ pub fn moveOpenedFileAtLoose(
 
     if (std.mem.lastIndexOfScalar(u16, new_path, '\\')) |last_slash| {
         const dirname = new_path[0..last_slash];
-        const fd = switch (bun.sys.openDirAtWindows(new_dir_fd, dirname, false, true)) {
+        const fd = switch (bun.sys.openDirAtWindows(new_dir_fd, dirname, .{ .can_rename_or_delete = true, .iterable = false })) {
             .err => |e| return .{ .err = e },
             .result => |fd| fd,
         };
@@ -1402,7 +1406,7 @@ const FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE: w.ULONG = 0x00000010;
 ///
 /// NOTE: THE FILE MUST BE OPENED WITH ACCESS_MASK "DELETE" OR THIS WILL FAIL
 pub fn deleteOpenedFile(fd: bun.FileDescriptor) Maybe(void) {
-    comptime std.debug.assert(builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs5));
+    comptime bun.assert(builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs5));
     var info = w.FILE_DISPOSITION_INFORMATION_EX{
         .Flags = FILE_DISPOSITION_DELETE |
             FILE_DISPOSITION_POSIX_SEMANTICS |
@@ -1425,3 +1429,7 @@ pub fn deleteOpenedFile(fd: bun.FileDescriptor) Maybe(void) {
     else
         Maybe(void).errno(rc, .NtSetInformationFile);
 }
+
+pub extern fn windows_enable_stdio_inheritance() void;
+
+pub extern "c" fn quick_exit(code: c_int) noreturn;

@@ -216,7 +216,9 @@ describe("TextDecoder", () => {
 
     text += ` ✨ Sparkles 🔥 Fire 😀 😃 😄 😁 😆 😅 😂 🤣 🥲 ☺️ 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥸 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰`;
     gcTrace(true);
-    expect(decoder.decode(encoder.encode(text))).toBe(text);
+    const result = decoder.decode(encoder.encode(text));
+    expect(result).toBe(text);
+    expect(result).toBeUTF16String();
     gcTrace(true);
     const bytes = new Uint8Array(getByteLength(text) * 8);
     gcTrace(true);
@@ -230,7 +232,14 @@ describe("TextDecoder", () => {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     expect(() => {
       decoder.decode(new Uint8Array([0xc0])); // Invalid UTF8
-    }).toThrow(TypeError);
+    }).toThrow(Error);
+    let err;
+    try {
+      decoder.decode(new Uint8Array([0xc0, 0x80])); // Invalid UTF8
+    } catch (e) {
+      err = e;
+    }
+    expect(err.code).toBe("ERR_ENCODING_INVALID_ENCODED_DATA");
   });
 
   it("should not trim invalid byte sequences when fatal is false", () => {

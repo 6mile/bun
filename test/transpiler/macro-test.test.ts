@@ -1,5 +1,3 @@
-// @known-failing-on-windows: panic "TODO on Windows"
-
 import { expect, test } from "bun:test";
 import { addStrings, addStringsUTF16, escape, identity } from "./macro.ts" assert { type: "macro" };
 import { escapeHTML } from "bun" assert { type: "macro" };
@@ -16,6 +14,16 @@ test("ascii string", () => {
   expect(identity("abc")).toBe("abc");
 });
 
+test("type coercion", () => {
+  expect(identity({ a: 1 })).toEqual({ a: 1 });
+  expect(identity([1, 2, 3])).toEqual([1, 2, 3]);
+  expect(identity(undefined)).toBe(undefined);
+  expect(identity(null)).toBe(null);
+  expect(identity(1.5)).toBe(1.5);
+  expect(identity(1)).toBe(1);
+  expect(identity(true)).toBe(true);
+});
+
 test("escaping", () => {
   expect(identity("\\")).toBe("\\");
   expect(identity("\f")).toBe("\f");
@@ -27,11 +35,11 @@ test("escaping", () => {
   expect(identity("'")).toBe("'");
   expect(identity('"')).toBe('"');
   expect(identity("`")).toBe("`");
-  // biome-ignore: format ignore
+  // prettier-ignore
   expect(identity("\'")).toBe("\'");
-  // biome-ignore: format ignoreormat ignore
+  // prettier-ignore
   expect(identity('\"')).toBe('\"');
-  // biome-ignore: format ignoreormat ignore
+  // prettier-ignore
   expect(identity("\`")).toBe("\`");
   expect(identity("$")).toBe("$");
   expect(identity("\x00")).toBe("\x00");

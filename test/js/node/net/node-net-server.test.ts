@@ -1,4 +1,3 @@
-// @known-failing-on-windows: 1 failing
 import { createServer, Server, AddressInfo, Socket } from "net";
 import { realpathSync } from "fs";
 import { tmpdir } from "os";
@@ -282,6 +281,7 @@ describe("net.createServer listen", () => {
         } catch (e) {
           err = e as Error;
         }
+
         expect(err).not.toBeNull();
         expect(err!.message).toBe("Failed to connect");
         expect(err!.name).toBe("ECONNREFUSED");

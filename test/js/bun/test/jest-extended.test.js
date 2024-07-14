@@ -45,18 +45,22 @@ describe("jest-extended", () => {
       new Uint8Array(),
       new Object(),
       Buffer.from(""),
-      ...(isBun ? [Bun.file("/tmp/empty.txt")] : []),
       new Headers(),
       new URLSearchParams(),
       new FormData(),
       (function* () {})(),
     ];
+    if (isBun) {
+      const { join } = require("path");
+      const { tmpdir } = require("os");
+      const { mkdtempSync, writeFileSync } = require("fs");
+      const tmpDir = mkdtempSync(join(tmpdir(), "jest-extended-"));
+      const tmpFile = join(tmpDir, "empty.txt");
+      values.push(Bun.file(tmpFile));
+      writeFileSync(tmpFile, "");
+    }
     for (const value of values) {
       test(label(value), () => {
-        if (value && typeof value === "object" && value instanceof Blob) {
-          require("fs").writeFileSync("/tmp/empty.txt", "");
-        }
-
         expect(value).toBeEmpty();
       });
     }
@@ -98,6 +102,40 @@ describe("jest-extended", () => {
   });
 
   // toBeOneOf('toSatisfy()')
+
+  test("toBeOneOf()", () => {
+    expect(1).toBeOneOf([1, 2, 3]);
+    expect(2).toBeOneOf([1, 2, 3]);
+    expect(3).toBeOneOf([1, 2, 3]);
+    expect(4).not.toBeOneOf([1, 2, 3]);
+    expect("a").toBeOneOf(["a", "b", "c"]);
+    expect("b").toBeOneOf(["a", "b", "c"]);
+    expect("c").toBeOneOf(["a", "b", "c"]);
+    expect("d").not.toBeOneOf(["a", "b", "c"]);
+    expect(true).toBeOneOf([true, false]);
+    expect(false).toBeOneOf([true, false]);
+    expect(null).toBeOneOf([null, undefined]);
+    expect(undefined).toBeOneOf([null, undefined]);
+    const abc = { c: 1 };
+    expect({}).not.toBeOneOf([{ b: 1 }, []]);
+    expect(abc).toBeOneOf([abc, {}]);
+    expect({}).not.toBeOneOf([abc, { a: 1 }]);
+    try {
+      expect(0).toBeOneOf([1, 2]);
+      expect.unreachable();
+    } catch (e) {
+      expect(e.message).not.toContain("unreachable");
+      if (typeof Bun === "object") expect(Bun.inspect(e)).not.toBeEmpty(); // verify that logging it doesn't cause a crash
+    }
+
+    try {
+      expect(1).not.toBeOneOf([1, 2]);
+      expect.unreachable();
+    } catch (e) {
+      expect(e.message).not.toContain("unreachable");
+      if (typeof Bun === "object") expect(Bun.inspect(e)).not.toBeEmpty(); // verify that logging it doesn't cause a crash
+    }
+  });
 
   test("toBeNil()", () => {
     expect(null).toBeNil();

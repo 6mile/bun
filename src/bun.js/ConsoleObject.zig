@@ -35,6 +35,8 @@ writer: BufferedWriter,
 
 counts: Counter = .{},
 
+pub fn format(_: @This(), comptime _: []const u8, _: anytype, _: anytype) !void {}
+
 pub fn init(error_writer: Output.WriterType, writer: Output.WriterType) ConsoleObject {
     return ConsoleObject{
         .error_writer = BufferedWriter{ .unbuffered_writer = error_writer },
@@ -83,9 +85,9 @@ pub fn messageWithTypeAndLevel(
     //message_level: u32,
     level: MessageLevel,
     global: *JSGlobalObject,
-    vals: [*]JSValue,
+    vals: [*]const JSValue,
     len: usize,
-) callconv(.C) void {
+) callconv(JSC.conv) void {
     if (comptime is_bindgen) {
         return;
     }
@@ -195,7 +197,7 @@ pub fn messageWithTypeAndLevel(
     }
 
     if (print_length > 0)
-        format(
+        format2(
             level,
             global,
             vals,
@@ -320,7 +322,7 @@ const TablePrinter = struct {
     fn updateColumnsForRow(this: *TablePrinter, columns: *std.ArrayList(Column), row_key: RowKey, row_value: JSValue) !void {
         // update size of "(index)" column
         const row_key_len: u32 = switch (row_key) {
-            .str => |value| @intCast(value.visibleWidthExcludeANSIColors()),
+            .str => |value| @intCast(value.visibleWidthExcludeANSIColors(false)),
             .num => |value| @truncate(bun.fmt.fastDigitCount(value)),
         };
         columns.items[0].width = @max(columns.items[0].width, row_key_len);
@@ -348,7 +350,7 @@ const TablePrinter = struct {
                 var cols_iter = JSC.JSPropertyIterator(.{
                     .skip_empty_name = false,
                     .include_value = true,
-                }).init(this.globalObject, row_value.asObjectRef());
+                }).init(this.globalObject, row_value);
                 defer cols_iter.deinit();
 
                 while (cols_iter.next()) |col_key| {
@@ -357,11 +359,16 @@ const TablePrinter = struct {
                     // find or create the column for the property
                     const column: *Column = brk: {
                         const col_str = String.init(col_key);
+
                         for (columns.items[1..]) |*col| {
                             if (col.name.eql(col_str)) {
                                 break :brk col;
                             }
                         }
+
+                        // Need to ref this string because JSPropertyIterator
+                        // uses `toString` instead of `toStringRef` for property names
+                        col_str.ref();
 
                         try columns.append(.{ .name = col_str });
 
@@ -400,7 +407,7 @@ const TablePrinter = struct {
         try writer.writeAll("│");
         {
             const len: u32 = switch (row_key) {
-                .str => |value| @truncate(value.visibleWidthExcludeANSIColors()),
+                .str => |value| @truncate(value.visibleWidthExcludeANSIColors(false)),
                 .num => |value| @truncate(bun.fmt.fastDigitCount(value)),
             };
             const needed = columns.items[0].width -| len;
@@ -522,7 +529,7 @@ const TablePrinter = struct {
                 var rows_iter = JSC.JSPropertyIterator(.{
                     .skip_empty_name = false,
                     .include_value = true,
-                }).init(globalObject, this.tabular_data.asObjectRef());
+                }).init(globalObject, this.tabular_data);
                 defer rows_iter.deinit();
 
                 while (rows_iter.next()) |row_key| {
@@ -544,7 +551,7 @@ const TablePrinter = struct {
         {
             for (columns.items) |*col| {
                 // also update the col width with the length of the column name itself
-                col.width = @max(col.width, @as(u32, @intCast(col.name.visibleWidthExcludeANSIColors())));
+                col.width = @max(col.width, @as(u32, @intCast(col.name.visibleWidthExcludeANSIColors(false))));
             }
 
             try writer.writeAll("┌");
@@ -557,7 +564,7 @@ const TablePrinter = struct {
 
             for (columns.items, 0..) |col, i| {
                 if (i > 0) try writer.writeAll("│");
-                const len = col.name.visibleWidthExcludeANSIColors();
+                const len = col.name.visibleWidthExcludeANSIColors(false);
                 const needed = col.width -| len;
                 try writer.writeByteNTimes(' ', 1);
                 if (comptime enable_ansi_colors) {
@@ -595,7 +602,7 @@ const TablePrinter = struct {
                 var rows_iter = JSC.JSPropertyIterator(.{
                     .skip_empty_name = false,
                     .include_value = true,
-                }).init(globalObject, this.tabular_data.asObjectRef());
+                }).init(globalObject, this.tabular_data);
                 defer rows_iter.deinit();
 
                 while (rows_iter.next()) |row_key| {
@@ -619,11 +626,22 @@ const TablePrinter = struct {
 
 pub fn writeTrace(comptime Writer: type, writer: Writer, global: *JSGlobalObject) void {
     var holder = ZigException.Holder.init();
-
+    var vm = VirtualMachine.get();
+    defer holder.deinit(vm);
     const exception = holder.zigException();
+
+    var source_code_slice: ?ZigString.Slice = null;
+    defer if (source_code_slice) |slice| slice.deinit();
+
     var err = ZigString.init("trace output").toErrorInstance(global);
     err.toZigException(global, exception);
-    VirtualMachine.get().remapZigException(exception, err, null);
+    vm.remapZigException(
+        exception,
+        err,
+        null,
+        &holder.need_to_clear_parser_arena_on_deinit,
+        &source_code_slice,
+    );
 
     if (Output.enable_ansi_colors_stderr)
         VirtualMachine.printStackTrace(
@@ -650,7 +668,7 @@ pub const FormatOptions = struct {
     max_depth: u16 = 2,
 };
 
-pub fn format(
+pub fn format2(
     level: MessageLevel,
     global: *JSGlobalObject,
     vals: [*]const JSValue,
@@ -680,7 +698,10 @@ pub fn format(
         const tag = ConsoleObject.Formatter.Tag.get(vals[0], global);
 
         var unbuffered_writer = if (comptime Writer != RawWriter)
-            writer.context.unbuffered_writer.context.writer()
+            if (@hasDecl(@TypeOf(writer.context.unbuffered_writer.context), "quietWriter"))
+                writer.context.unbuffered_writer.context.quietWriter()
+            else
+                writer.context.unbuffered_writer.context.writer()
         else
             writer;
 
@@ -915,12 +936,15 @@ pub const Formatter = struct {
         JSON,
         toJSON,
         NativeCode,
-        ArrayBuffer,
 
         JSX,
         Event,
 
-        Getter,
+        GetterSetter,
+        CustomGetterSetter,
+
+        Proxy,
+        RevokedProxy,
 
         pub fn isPrimitive(this: Tag) bool {
             return switch (this) {
@@ -970,13 +994,19 @@ pub const Formatter = struct {
                 JSON: void,
                 toJSON: void,
                 NativeCode: void,
-                ArrayBuffer: void,
                 JSX: void,
                 Event: void,
-                Getter: void,
+                GetterSetter: void,
+                CustomGetterSetter: void,
+                Proxy: void,
+                RevokedProxy: void,
 
                 pub fn isPrimitive(this: @This()) bool {
                     return @as(Tag, this).isPrimitive();
+                }
+
+                pub fn tag(this: @This()) Tag {
+                    return @as(Tag, this);
                 }
             },
             cell: JSValue.JSType = JSValue.JSType.Cell,
@@ -1027,8 +1057,6 @@ pub const Formatter = struct {
                 .cell = js_type,
             };
 
-            // Cell is the "unknown" type
-            // if we call JSObjectGetPrivate, it can segfault
             if (js_type == .Cell) {
                 return .{
                     .tag = .{ .NativeCode = {} },
@@ -1107,24 +1135,33 @@ pub const Formatter = struct {
 
             return .{
                 .tag = switch (js_type) {
-                    JSValue.JSType.ErrorInstance => .Error,
-                    JSValue.JSType.NumberObject => .Double,
-                    JSValue.JSType.DerivedArray, JSValue.JSType.Array => .Array,
-                    JSValue.JSType.DerivedStringObject, JSValue.JSType.String, JSValue.JSType.StringObject => .String,
-                    JSValue.JSType.RegExpObject => .String,
-                    JSValue.JSType.Symbol => .Symbol,
-                    JSValue.JSType.BooleanObject => .Boolean,
-                    JSValue.JSType.JSFunction => .Function,
-                    JSValue.JSType.JSWeakMap, JSValue.JSType.JSMap => .Map,
-                    JSValue.JSType.JSMapIterator => .MapIterator,
-                    JSValue.JSType.JSSetIterator => .SetIterator,
-                    JSValue.JSType.JSWeakSet, JSValue.JSType.JSSet => .Set,
-                    JSValue.JSType.JSDate => .JSON,
-                    JSValue.JSType.JSPromise => .Promise,
-                    JSValue.JSType.Object,
-                    JSValue.JSType.FinalObject,
+                    .ErrorInstance => .Error,
+                    .NumberObject => .Double,
+                    .DerivedArray, JSValue.JSType.Array => .Array,
+                    .DerivedStringObject, JSValue.JSType.String, JSValue.JSType.StringObject => .String,
+                    .RegExpObject => .String,
+                    .Symbol => .Symbol,
+                    .BooleanObject => .Boolean,
+                    .JSFunction => .Function,
+                    .JSWeakMap, JSValue.JSType.JSMap => .Map,
+                    .JSMapIterator => .MapIterator,
+                    .JSSetIterator => .SetIterator,
+                    .JSWeakSet, JSValue.JSType.JSSet => .Set,
+                    .JSDate => .JSON,
+                    .JSPromise => .Promise,
+
+                    .Object,
+                    .FinalObject,
                     .ModuleNamespaceObject,
                     => .Object,
+
+                    .ProxyObject => tag: {
+                        const handler = value.getProxyInternalField(.handler);
+                        if (handler == .zero or handler == .undefined or handler == .null) {
+                            break :tag .RevokedProxy;
+                        }
+                        break :tag .Proxy;
+                    },
 
                     .GlobalObject => if (!opts.hide_global)
                         .Object
@@ -1132,17 +1169,17 @@ pub const Formatter = struct {
                         .GlobalObject,
 
                     .ArrayBuffer,
-                    JSValue.JSType.Int8Array,
-                    JSValue.JSType.Uint8Array,
-                    JSValue.JSType.Uint8ClampedArray,
-                    JSValue.JSType.Int16Array,
-                    JSValue.JSType.Uint16Array,
-                    JSValue.JSType.Int32Array,
-                    JSValue.JSType.Uint32Array,
-                    JSValue.JSType.Float32Array,
-                    JSValue.JSType.Float64Array,
-                    JSValue.JSType.BigInt64Array,
-                    JSValue.JSType.BigUint64Array,
+                    .Int8Array,
+                    .Uint8Array,
+                    .Uint8ClampedArray,
+                    .Int16Array,
+                    .Uint16Array,
+                    .Int32Array,
+                    .Uint32Array,
+                    .Float32Array,
+                    .Float64Array,
+                    .BigInt64Array,
+                    .BigUint64Array,
                     .DataView,
                     => .TypedArray,
 
@@ -1176,7 +1213,8 @@ pub const Formatter = struct {
 
                     .Event => .Event,
 
-                    .GetterSetter, .CustomGetterSetter => .Getter,
+                    .GetterSetter => .GetterSetter,
+                    .CustomGetterSetter => .CustomGetterSetter,
 
                     .JSAsJSONType => .toJSON,
 
@@ -1190,13 +1228,23 @@ pub const Formatter = struct {
     const CellType = JSC.C.CellType;
     threadlocal var name_buf: [512]u8 = undefined;
 
+    /// https://console.spec.whatwg.org/#formatter
+    const PercentTag = enum {
+        s, // s
+        i, // i or d
+        f, // f
+        o, // o
+        O, // O
+        c, // c
+    };
+
     fn writeWithFormatting(
         this: *ConsoleObject.Formatter,
         comptime Writer: type,
         writer_: Writer,
         comptime Slice: type,
         slice_: Slice,
-        globalThis: *JSGlobalObject,
+        global: *JSGlobalObject,
         comptime enable_ansi_colors: bool,
     ) void {
         var writer = WrappedWriter(Writer){
@@ -1206,56 +1254,189 @@ pub const Formatter = struct {
         var slice = slice_;
         var i: u32 = 0;
         var len: u32 = @as(u32, @truncate(slice.len));
-        var any_non_ascii = false;
+        var hit_percent = false;
         while (i < len) : (i += 1) {
+            if (hit_percent) {
+                i = 0;
+                hit_percent = false;
+            }
+
             switch (slice[i]) {
                 '%' => {
                     i += 1;
                     if (i >= len)
                         break;
 
-                    const token = switch (slice[i]) {
-                        's' => Tag.String,
-                        'f' => Tag.Double,
-                        'o' => Tag.Undefined,
-                        'O' => Tag.Object,
-                        'd', 'i' => Tag.Integer,
+                    if (this.remaining_values.len == 0)
+                        break;
+
+                    const token: PercentTag = switch (slice[i]) {
+                        's' => .s,
+                        'f' => .f,
+                        'o' => .o,
+                        'O' => .O,
+                        'd', 'i' => .i,
+                        'c' => .c,
+                        '%' => {
+                            // print up to and including the first %
+                            const end = slice[0..i];
+                            writer.writeAll(end);
+                            // then skip the second % so we dont hit it again
+                            slice = slice[@min(slice.len, i + 1)..];
+                            i = 0;
+                            continue;
+                        },
                         else => continue,
                     };
 
                     // Flush everything up to the %
                     const end = slice[0 .. i - 1];
-                    if (!any_non_ascii)
-                        writer.writeAll(end)
-                    else
-                        writer.writeAll(end);
-                    any_non_ascii = false;
+                    writer.writeAll(end);
                     slice = slice[@min(slice.len, i + 1)..];
                     i = 0;
+                    hit_percent = true;
                     len = @as(u32, @truncate(slice.len));
                     const next_value = this.remaining_values[0];
                     this.remaining_values = this.remaining_values[1..];
+
+                    // https://console.spec.whatwg.org/#formatter
+                    const max_before_e_notation = 1000000000000000000000;
+                    const min_before_e_notation = 0.000001;
                     switch (token) {
-                        Tag.String => this.printAs(Tag.String, Writer, writer_, next_value, next_value.jsType(), enable_ansi_colors),
-                        Tag.Double => this.printAs(Tag.Double, Writer, writer_, next_value, next_value.jsType(), enable_ansi_colors),
-                        Tag.Object => this.printAs(Tag.Object, Writer, writer_, next_value, next_value.jsType(), enable_ansi_colors),
-                        Tag.Integer => this.printAs(Tag.Integer, Writer, writer_, next_value, next_value.jsType(), enable_ansi_colors),
+                        .s => this.printAs(Tag.String, Writer, writer_, next_value, next_value.jsType(), enable_ansi_colors),
+                        .i => {
+                            // 1. If Type(current) is Symbol, let converted be NaN
+                            // 2. Otherwise, let converted be the result of Call(%parseInt%, undefined, current, 10)
+                            const int: i64 = brk: {
+                                // This logic is convoluted because %parseInt% will coerce the argument to a string
+                                // first. As an optimization, we can check if the argument is a number and
+                                // skip such coercion.
+                                if (next_value.isInt32()) {
+                                    // Already an int, parseInt will parse to itself.
+                                    break :brk next_value.asInt32();
+                                }
 
-                        // undefined is overloaded to mean the '%o" field
-                        Tag.Undefined => this.format(Tag.get(next_value, globalThis), Writer, writer_, next_value, globalThis, enable_ansi_colors),
+                                if (next_value.isNumber() or !next_value.isSymbol()) double_convert: {
+                                    var value = next_value.coerceToDouble(global);
 
-                        else => unreachable,
+                                    if (!std.math.isFinite(value)) {
+                                        // for NaN and the string Infinity and -Infinity, parseInt returns NaN
+                                        break :double_convert;
+                                    }
+
+                                    // simulate parseInt, which converts the argument to a string and
+                                    // then back to a number, without converting it to a string
+                                    if (value == 0) {
+                                        break :brk 0;
+                                    }
+
+                                    const sign: i64 = if (value < 0) -1 else 1;
+                                    value = @abs(value);
+                                    if (value >= max_before_e_notation) {
+                                        // toString prints 1.000+e0, which parseInt will stop at
+                                        // the '.' or the '+', this gives us a single digit value.
+                                        while (value >= 10) value /= 10;
+                                        break :brk @as(i64, @intFromFloat(@floor(value))) * sign;
+                                    } else if (value < min_before_e_notation) {
+                                        // toString prints 1.000-e0, which parseInt will stop at
+                                        // the '.' or the '-', this gives us a single digit value.
+                                        while (value < 1) value *= 10;
+                                        break :brk @as(i64, @intFromFloat(@floor(value))) * sign;
+                                    }
+
+                                    // parsing stops at '.', so this is equal to @floor
+                                    break :brk @as(i64, @intFromFloat(@floor(value))) * sign;
+                                }
+
+                                // for NaN and the string Infinity and -Infinity, parseInt returns NaN
+                                this.addForNewLine("NaN".len);
+                                writer.print("NaN", .{});
+                                continue;
+                            };
+
+                            if (int < std.math.maxInt(u32)) {
+                                const is_negative = int < 0;
+                                const digits = if (i != 0)
+                                    bun.fmt.fastDigitCount(@as(u64, @intCast(@abs(int)))) + @as(u64, @intFromBool(is_negative))
+                                else
+                                    1;
+                                this.addForNewLine(digits);
+                            } else {
+                                this.addForNewLine(bun.fmt.count("{d}", .{int}));
+                            }
+                            writer.print("{d}", .{int});
+                        },
+
+                        .f => {
+                            // 1. If Type(current) is Symbol, let converted be NaN
+                            // 2. Otherwise, let converted be the result of Call(%parseFloat%, undefined, [current]).
+                            const converted: f64 = brk: {
+                                if (next_value.isInt32()) {
+                                    const int = next_value.asInt32();
+                                    const is_negative = int < 0;
+                                    const digits = if (i != 0)
+                                        bun.fmt.fastDigitCount(@as(u64, @intCast(@abs(int)))) + @as(u64, @intFromBool(is_negative))
+                                    else
+                                        1;
+                                    this.addForNewLine(digits);
+                                    writer.print("{d}", .{int});
+                                    continue;
+                                }
+                                if (next_value.isNumber()) {
+                                    break :brk next_value.asNumber();
+                                }
+                                if (next_value.isSymbol()) {
+                                    break :brk std.math.nan(f64);
+                                }
+                                // TODO: this is not perfectly emulating parseFloat,
+                                // because spec says to convert the value to a string
+                                // and then parse as a number, but we are just coercing
+                                // a number.
+                                break :brk next_value.coerceToDouble(global);
+                            };
+
+                            const abs = @abs(converted);
+                            if (abs < max_before_e_notation and abs >= min_before_e_notation) {
+                                this.addForNewLine(bun.fmt.count("{d}", .{converted}));
+                                writer.print("{d}", .{converted});
+                            } else if (std.math.isNan(converted)) {
+                                this.addForNewLine("NaN".len);
+                                writer.writeAll("NaN");
+                            } else if (std.math.isInf(converted)) {
+                                this.addForNewLine("Infinity".len + @as(usize, @intFromBool(converted < 0)));
+                                if (converted < 0) {
+                                    writer.writeAll("-");
+                                }
+                                writer.writeAll("Infinity");
+                            } else {
+                                var buf: [124]u8 = undefined;
+                                const formatted = bun.fmt.FormatDouble.dtoa(&buf, converted);
+                                this.addForNewLine(formatted.len);
+                                writer.print("{s}", .{formatted});
+                            }
+                        },
+
+                        inline .o, .O => |t| {
+                            if (t == .o) {
+                                // TODO: Node.js applies the following extra formatter options.
+                                //
+                                // this.max_depth = 4;
+                                // this.show_proxy = true;
+                                // this.show_hidden = true;
+                                //
+                                // Spec defines %o as:
+                                // > An object with optimally useful formatting is an
+                                // > implementation-specific, potentially-interactive representation
+                                // > of an object judged to be maximally useful and informative.
+                            }
+                            this.format(Tag.get(next_value, global), Writer, writer_, next_value, global, enable_ansi_colors);
+                        },
+
+                        .c => {
+                            // TODO: Implement %c
+                        },
                     }
                     if (this.remaining_values.len == 0) break;
-                },
-                '\\' => {
-                    i += 1;
-                    if (i >= len)
-                        break;
-                    if (slice[i] == '%') i += 2;
-                },
-                128...255 => {
-                    any_non_ascii = true;
                 },
                 else => {},
             }
@@ -1490,7 +1671,7 @@ pub const Formatter = struct {
             parent: JSValue,
             const enable_ansi_colors = enable_ansi_colors_;
             pub fn handleFirstProperty(this: *@This(), globalThis: *JSC.JSGlobalObject, value: JSValue) void {
-                if (!value.jsType().isFunction()) {
+                if (value.isCell() and !value.jsType().isFunction()) {
                     var writer = WrappedWriter(Writer){
                         .ctx = this.writer,
                         .failed = false,
@@ -1519,12 +1700,11 @@ pub const Formatter = struct {
             pub fn forEach(
                 globalThis: *JSGlobalObject,
                 ctx_ptr: ?*anyopaque,
-                key_: [*c]ZigString,
+                key: *ZigString,
                 value: JSValue,
                 is_symbol: bool,
                 is_private_symbol: bool,
             ) callconv(.C) void {
-                const key = key_.?[0];
                 if (key.eqlComptime("constructor")) return;
 
                 var ctx: *@This() = bun.cast(*@This(), ctx_ptr orelse return);
@@ -1607,8 +1787,11 @@ pub const Formatter = struct {
                 } else if (Environment.isDebug and is_private_symbol) {
                     this.addForNewLine(1 + "$:".len + key.len);
                     writer.print(
-                        comptime Output.prettyFmt("<r><magenta>${any}<r><d>:<r> ", enable_ansi_colors),
-                        .{key},
+                        comptime Output.prettyFmt("<r><magenta>{s}{any}<r><d>:<r> ", enable_ansi_colors),
+                        .{
+                            if (key.len > 0 and key.charAt(0) == '#') "" else "$",
+                            key,
+                        },
                     );
                 } else {
                     this.addForNewLine(1 + "[Symbol()]:".len + key.len);
@@ -1646,11 +1829,13 @@ pub const Formatter = struct {
 
     extern fn JSC__JSValue__callCustomInspectFunction(
         *JSC.JSGlobalObject,
+        *JSC.JSGlobalObject,
         JSValue,
         JSValue,
         depth: u32,
         max_depth: u32,
         colors: bool,
+        is_exception: *bool,
     ) JSValue;
 
     pub fn printAs(
@@ -1699,6 +1884,7 @@ pub const Formatter = struct {
                 this.writeWithFormatting(Writer, writer_, @TypeOf(slice), slice, this.globalThis, enable_ansi_colors);
             },
             .String => {
+                // This is called from the '%s' formatter, so it can actually be any value
                 const str: bun.String = bun.String.tryFromJS(value, this.globalThis) orelse {
                     writer.failed = true;
                     return;
@@ -1813,8 +1999,10 @@ pub const Formatter = struct {
                     this.addForNewLine("NaN".len);
                     writer.print(comptime Output.prettyFmt("<r><yellow>NaN<r>", enable_ansi_colors), .{});
                 } else {
-                    this.addForNewLine(std.fmt.count("{d}", .{num}));
-                    writer.print(comptime Output.prettyFmt("<r><yellow>{d}<r>", enable_ansi_colors), .{num});
+                    var buf: [124]u8 = undefined;
+                    const formatted = bun.fmt.FormatDouble.dtoaWithNegativeZero(&buf, num);
+                    this.addForNewLine(formatted.len);
+                    writer.print(comptime Output.prettyFmt("<r><yellow>{s}<r>", enable_ansi_colors), .{formatted});
                 }
             },
             .Undefined => {
@@ -1826,16 +2014,25 @@ pub const Formatter = struct {
                 writer.print(comptime Output.prettyFmt("<r><yellow>null<r>", enable_ansi_colors), .{});
             },
             .CustomFormattedObject => {
+                var is_exception = false;
                 // Call custom inspect function. Will return the error if there is one
                 // we'll need to pass the callback through to the "this" value in here
                 const result = JSC__JSValue__callCustomInspectFunction(
+                    JSC.VirtualMachine.get().global,
                     this.globalThis,
                     this.custom_formatted_object.function,
                     this.custom_formatted_object.this,
                     this.max_depth -| this.depth,
                     this.max_depth,
                     enable_ansi_colors,
+                    &is_exception,
                 );
+                if (is_exception) {
+                    // Previously, this printed [native code]
+                    // TODO: in the future, should this throw when in Bun.inspect?
+                    writer.print("[custom formatter threw an exception]", .{});
+                    return;
+                }
                 // Strings are printed directly, otherwise we recurse. It is possible to end up in an infinite loop.
                 if (result.isString()) {
                     writer.print("{}", .{result.fmtString(this.globalThis)});
@@ -1880,14 +2077,49 @@ pub const Formatter = struct {
                 var printable = value.getName(this.globalThis);
                 defer printable.deref();
 
+                const proto = value.getPrototype(this.globalThis);
+                const func_name = proto.getName(this.globalThis); // "Function" | "AsyncFunction" | "GeneratorFunction" | "AsyncGeneratorFunction"
+                defer func_name.deref();
+
                 if (printable.isEmpty()) {
-                    writer.print(comptime Output.prettyFmt("<cyan>[Function]<r>", enable_ansi_colors), .{});
+                    if (func_name.isEmpty()) {
+                        writer.print(comptime Output.prettyFmt("<cyan>[Function]<r>", enable_ansi_colors), .{});
+                    } else {
+                        writer.print(comptime Output.prettyFmt("<cyan>[{}]<r>", enable_ansi_colors), .{func_name});
+                    }
                 } else {
-                    writer.print(comptime Output.prettyFmt("<cyan>[Function: {}]<r>", enable_ansi_colors), .{printable});
+                    if (func_name.isEmpty()) {
+                        writer.print(comptime Output.prettyFmt("<cyan>[Function: {}]<r>", enable_ansi_colors), .{printable});
+                    } else {
+                        writer.print(comptime Output.prettyFmt("<cyan>[{}: {}]<r>", enable_ansi_colors), .{ func_name, printable });
+                    }
                 }
             },
-            .Getter => {
-                writer.print(comptime Output.prettyFmt("<cyan>[Getter]<r>", enable_ansi_colors), .{});
+            .GetterSetter => {
+                const cell = value.asCell();
+                const getterSetter = cell.getGetterSetter();
+                const hasGetter = !getterSetter.isGetterNull();
+                const hasSetter = !getterSetter.isSetterNull();
+                if (hasGetter and hasSetter) {
+                    writer.print(comptime Output.prettyFmt("<cyan>[Getter/Setter]<r>", enable_ansi_colors), .{});
+                } else if (hasGetter) {
+                    writer.print(comptime Output.prettyFmt("<cyan>[Getter]<r>", enable_ansi_colors), .{});
+                } else if (hasSetter) {
+                    writer.print(comptime Output.prettyFmt("<cyan>[Setter]<r>", enable_ansi_colors), .{});
+                }
+            },
+            .CustomGetterSetter => {
+                const cell = value.asCell();
+                const getterSetter = cell.getCustomGetterSetter();
+                const hasGetter = !getterSetter.isGetterNull();
+                const hasSetter = !getterSetter.isSetterNull();
+                if (hasGetter and hasSetter) {
+                    writer.print(comptime Output.prettyFmt("<cyan>[Getter/Setter]<r>", enable_ansi_colors), .{});
+                } else if (hasGetter) {
+                    writer.print(comptime Output.prettyFmt("<cyan>[Getter]<r>", enable_ansi_colors), .{});
+                } else if (hasSetter) {
+                    writer.print(comptime Output.prettyFmt("<cyan>[Setter]<r>", enable_ansi_colors), .{});
+                }
             },
             .Array => {
                 const len = @as(u32, @truncate(value.getLength(this.globalThis)));
@@ -2028,6 +2260,17 @@ pub const Formatter = struct {
                             writer.pretty("<r><d>{d} x empty items<r>", enable_ansi_colors, .{empty_count});
                         }
                     }
+
+                    const Iterator = PropertyIterator(Writer, enable_ansi_colors);
+                    var iter = Iterator{
+                        .formatter = this,
+                        .writer = writer_,
+                        .always_newline = !this.single_line and (this.always_newline_scope or this.goodTimeForANewLine()),
+                        .single_line = this.single_line,
+                        .parent = value,
+                        .i = i,
+                    };
+                    value.forEachPropertyNonIndexed(this.globalThis, &iter, Iterator.forEach);
                 }
 
                 if (!this.single_line and (this.ordered_properties or was_good_time or this.goodTimeForANewLine())) {
@@ -2368,10 +2611,21 @@ pub const Formatter = struct {
                 writer.print("{}", .{str});
             },
             .Event => {
-                const event_type = EventType.map.getWithEql(value.get(this.globalThis, "type").?.getZigString(this.globalThis), ZigString.eqlComptime) orelse EventType.unknown;
-                if (event_type != .MessageEvent and event_type != .ErrorEvent) {
-                    return this.printAs(.Object, Writer, writer_, value, .Event, enable_ansi_colors);
-                }
+                const event_type_value = brk: {
+                    const value_ = value.get(this.globalThis, "type") orelse break :brk JSValue.undefined;
+                    if (value_.isString()) {
+                        break :brk value_;
+                    }
+
+                    break :brk JSValue.undefined;
+                };
+
+                const event_type = switch (EventType.map.fromJS(this.globalThis, event_type_value) orelse .unknown) {
+                    .MessageEvent, .ErrorEvent => |evt| evt,
+                    else => {
+                        return this.printAs(.Object, Writer, writer_, value, .Event, enable_ansi_colors);
+                    },
+                };
 
                 writer.print(
                     comptime Output.prettyFmt("<r><cyan>{s}<r> {{\n", enable_ansi_colors),
@@ -2397,56 +2651,67 @@ pub const Formatter = struct {
                                     event_type.label(),
                                 },
                             );
-                            if (!single_line) {
+                        },
+                    }
+
+                    if (value.fastGet(this.globalThis, .message)) |message_value| {
+                        if (message_value.isString()) {
+                            if (!this.single_line) {
                                 this.writeIndent(Writer, writer_) catch unreachable;
                             }
-                        },
+
+                            writer.print(
+                                comptime Output.prettyFmt("<r><blue>message<d>:<r> ", enable_ansi_colors),
+                                .{},
+                            );
+
+                            const tag = Tag.getAdvanced(message_value, this.globalThis, .{ .hide_global = true });
+                            this.format(tag, Writer, writer_, message_value, this.globalThis, enable_ansi_colors);
+                            this.printComma(Writer, writer_, enable_ansi_colors) catch unreachable;
+                            if (!this.single_line) {
+                                writer.writeAll("\n");
+                            }
+                        }
                     }
 
                     switch (event_type) {
                         .MessageEvent => {
+                            if (!this.single_line) {
+                                this.writeIndent(Writer, writer_) catch unreachable;
+                            }
+
                             writer.print(
                                 comptime Output.prettyFmt("<r><blue>data<d>:<r> ", enable_ansi_colors),
                                 .{},
                             );
-                            const data = value.get(this.globalThis, "data").?;
+                            const data = value.fastGet(this.globalThis, .data) orelse JSValue.undefined;
                             const tag = Tag.getAdvanced(data, this.globalThis, .{ .hide_global = true });
-                            if (tag.cell.isStringLike()) {
-                                this.format(tag, Writer, writer_, data, this.globalThis, enable_ansi_colors);
-                            } else {
-                                this.format(tag, Writer, writer_, data, this.globalThis, enable_ansi_colors);
+                            this.format(tag, Writer, writer_, data, this.globalThis, enable_ansi_colors);
+                            this.printComma(Writer, writer_, enable_ansi_colors) catch unreachable;
+                            if (!this.single_line) {
+                                writer.writeAll("\n");
                             }
                         },
                         .ErrorEvent => {
-                            {
-                                const error_value = value.get(this.globalThis, "error").?;
-
-                                if (!error_value.isEmptyOrUndefinedOrNull()) {
-                                    writer.print(
-                                        comptime Output.prettyFmt("<r><blue>error<d>:<r> ", enable_ansi_colors),
-                                        .{},
-                                    );
-
-                                    const tag = Tag.getAdvanced(error_value, this.globalThis, .{ .hide_global = true });
-                                    this.format(tag, Writer, writer_, error_value, this.globalThis, enable_ansi_colors);
+                            if (value.fastGet(this.globalThis, .@"error")) |error_value| {
+                                if (!this.single_line) {
+                                    this.writeIndent(Writer, writer_) catch unreachable;
                                 }
-                            }
 
-                            const message_value = value.get(this.globalThis, "message").?;
-                            if (message_value.isString()) {
                                 writer.print(
-                                    comptime Output.prettyFmt("<r><blue>message<d>:<r> ", enable_ansi_colors),
+                                    comptime Output.prettyFmt("<r><blue>error<d>:<r> ", enable_ansi_colors),
                                     .{},
                                 );
 
-                                const tag = Tag.getAdvanced(message_value, this.globalThis, .{ .hide_global = true });
-                                this.format(tag, Writer, writer_, message_value, this.globalThis, enable_ansi_colors);
+                                const tag = Tag.getAdvanced(error_value, this.globalThis, .{ .hide_global = true });
+                                this.format(tag, Writer, writer_, error_value, this.globalThis, enable_ansi_colors);
+                                this.printComma(Writer, writer_, enable_ansi_colors) catch unreachable;
+                                if (!this.single_line) {
+                                    writer.writeAll("\n");
+                                }
                             }
                         },
                         else => unreachable,
-                    }
-                    if (!this.single_line) {
-                        writer.writeAll("\n");
                     }
                 }
 
@@ -2524,7 +2789,7 @@ pub const Formatter = struct {
                         .skip_empty_name = true,
 
                         .include_value = true,
-                    }).init(this.globalThis, props.asObjectRef());
+                    }).init(this.globalThis, props);
                     defer props_iter.deinit();
 
                     const children_prop = props.get(this.globalThis, "children");
@@ -2676,6 +2941,7 @@ pub const Formatter = struct {
                 writer.writeAll(" />");
             },
             .Object => {
+                bun.assert(value.isCell());
                 const prev_quote_strings = this.quote_strings;
                 this.quote_strings = true;
                 defer this.quote_strings = prev_quote_strings;
@@ -2849,7 +3115,20 @@ pub const Formatter = struct {
 
                 writer.writeAll(" ]");
             },
-            else => {},
+            .RevokedProxy => {
+                this.addForNewLine("<Revoked Proxy>".len);
+                writer.print(comptime Output.prettyFmt("<r><cyan>\\<Revoked Proxy\\><r>", enable_ansi_colors), .{});
+            },
+            .Proxy => {
+                const target = value.getProxyInternalField(.target);
+                if (Environment.allow_assert) {
+                    // Proxy does not allow non-objects here.
+                    bun.assert(target.isCell());
+                }
+                // TODO: if (options.showProxy), print like `Proxy { target: ..., handlers: ... }`
+                // this is default off so it is not used.
+                this.format(ConsoleObject.Formatter.Tag.get(target, this.globalThis), Writer, writer_, target, this.globalThis, enable_ansi_colors);
+            },
         }
     }
 
@@ -2863,7 +3142,9 @@ pub const Formatter = struct {
         else
             "<r><d>, ... {d} more<r>";
 
-        writer.print(comptime Output.prettyFmt(fmt_, enable_ansi_colors), .{slice[0]});
+        writer.print(comptime Output.prettyFmt(fmt_, enable_ansi_colors), .{
+            if (@typeInfo(Number) == .Float) bun.fmt.fmtDouble(@floatCast(slice[0])) else slice[0],
+        });
         var leftover = slice[1..];
         const max = 512;
         leftover = leftover[0..@min(leftover.len, max)];
@@ -2871,7 +3152,9 @@ pub const Formatter = struct {
             this.printComma(@TypeOf(&writer.ctx), &writer.ctx, enable_ansi_colors) catch return;
             writer.space();
 
-            writer.print(comptime Output.prettyFmt(fmt_, enable_ansi_colors), .{el});
+            writer.print(comptime Output.prettyFmt(fmt_, enable_ansi_colors), .{
+                if (@typeInfo(Number) == .Float) bun.fmt.fmtDouble(@floatCast(el)) else el,
+            });
         }
 
         if (slice.len > max + 1) {
@@ -2880,9 +3163,6 @@ pub const Formatter = struct {
     }
 
     pub fn format(this: *ConsoleObject.Formatter, result: Tag.Result, comptime Writer: type, writer: Writer, value: JSValue, globalThis: *JSGlobalObject, comptime enable_ansi_colors: bool) void {
-        if (comptime is_bindgen) {
-            return;
-        }
         const prevGlobalThis = this.globalThis;
         defer this.globalThis = prevGlobalThis;
         this.globalThis = globalThis;
@@ -2891,43 +3171,11 @@ pub const Formatter = struct {
         // comptime var so we have to repeat it here. The rationale there is
         // it _should_ limit the stack usage because each version of the
         // function will be relatively small
-        switch (result.tag) {
-            .StringPossiblyFormatted => this.printAs(.StringPossiblyFormatted, Writer, writer, value, result.cell, enable_ansi_colors),
-            .String => this.printAs(.String, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Undefined => this.printAs(.Undefined, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Double => this.printAs(.Double, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Integer => this.printAs(.Integer, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Null => this.printAs(.Null, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Boolean => this.printAs(.Boolean, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Array => this.printAs(.Array, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Object => this.printAs(.Object, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Function => this.printAs(.Function, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Class => this.printAs(.Class, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Error => this.printAs(.Error, Writer, writer, value, result.cell, enable_ansi_colors),
-            .ArrayBuffer, .TypedArray => this.printAs(.TypedArray, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Map => this.printAs(.Map, Writer, writer, value, result.cell, enable_ansi_colors),
-            .MapIterator => this.printAs(.MapIterator, Writer, writer, value, result.cell, enable_ansi_colors),
-            .SetIterator => this.printAs(.SetIterator, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Set => this.printAs(.Set, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Symbol => this.printAs(.Symbol, Writer, writer, value, result.cell, enable_ansi_colors),
-            .BigInt => this.printAs(.BigInt, Writer, writer, value, result.cell, enable_ansi_colors),
-            .GlobalObject => this.printAs(.GlobalObject, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Private => this.printAs(.Private, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Promise => this.printAs(.Promise, Writer, writer, value, result.cell, enable_ansi_colors),
+        switch (result.tag.tag()) {
+            inline else => |tag| this.printAs(tag, Writer, writer, value, result.cell, enable_ansi_colors),
 
-            // Call JSON.stringify on the value
-            .JSON => this.printAs(.JSON, Writer, writer, value, result.cell, enable_ansi_colors),
-
-            // Call value.toJSON() and print as an object
-            .toJSON => this.printAs(.toJSON, Writer, writer, value, result.cell, enable_ansi_colors),
-
-            .NativeCode => this.printAs(.NativeCode, Writer, writer, value, result.cell, enable_ansi_colors),
-            .JSX => this.printAs(.JSX, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Event => this.printAs(.Event, Writer, writer, value, result.cell, enable_ansi_colors),
-            .Getter => this.printAs(.Getter, Writer, writer, value, result.cell, enable_ansi_colors),
-
-            .CustomFormattedObject => |callback| {
-                this.custom_formatted_object = callback;
+            .CustomFormattedObject => {
+                this.custom_formatted_object = result.tag.CustomFormattedObject;
                 this.printAs(.CustomFormattedObject, Writer, writer, value, result.cell, enable_ansi_colors);
             },
         }
@@ -2943,7 +3191,7 @@ pub fn count(
     ptr: [*]const u8,
     // len
     len: usize,
-) callconv(.C) void {
+) callconv(JSC.conv) void {
     var this = globalThis.bunVM().console;
     const slice = ptr[0..len];
     const hash = bun.hash(slice);
@@ -2969,7 +3217,7 @@ pub fn countReset(
     ptr: [*]const u8,
     // len
     len: usize,
-) callconv(.C) void {
+) callconv(JSC.conv) void {
     var this = globalThis.bunVM().console;
     const slice = ptr[0..len];
     const hash = bun.hash(slice);
@@ -2989,7 +3237,7 @@ pub fn time(
     _: *JSGlobalObject,
     chars: [*]const u8,
     len: usize,
-) callconv(.C) void {
+) callconv(JSC.conv) void {
     const id = bun.hash(chars[0..len]);
     if (!pending_time_logs_loaded) {
         pending_time_logs = PendingTimers.init(default_allocator);
@@ -3009,7 +3257,7 @@ pub fn timeEnd(
     _: *JSGlobalObject,
     chars: [*]const u8,
     len: usize,
-) callconv(.C) void {
+) callconv(JSC.conv) void {
     if (!pending_time_logs_loaded) {
         return;
     }
@@ -3040,7 +3288,7 @@ pub fn timeLog(
     // args
     args: [*]JSValue,
     args_len: usize,
-) callconv(.C) void {
+) callconv(JSC.conv) void {
     if (!pending_time_logs_loaded) {
         return;
     }
@@ -3087,7 +3335,7 @@ pub fn profile(
     _: [*]const u8,
     // len
     _: usize,
-) callconv(.C) void {}
+) callconv(JSC.conv) void {}
 pub fn profileEnd(
     // console
     _: ConsoleObject.Type,
@@ -3097,7 +3345,7 @@ pub fn profileEnd(
     _: [*]const u8,
     // len
     _: usize,
-) callconv(.C) void {}
+) callconv(JSC.conv) void {}
 pub fn takeHeapSnapshot(
     // console
     _: ConsoleObject.Type,
@@ -3107,7 +3355,7 @@ pub fn takeHeapSnapshot(
     _: [*]const u8,
     // len
     _: usize,
-) callconv(.C) void {
+) callconv(JSC.conv) void {
     // TODO: this does an extra JSONStringify and we don't need it to!
     var snapshot: [1]JSValue = .{globalThis.generateHeapSnapshot()};
     ConsoleObject.messageWithTypeAndLevel(undefined, MessageType.Log, MessageLevel.Debug, globalThis, &snapshot, 1);
@@ -3119,7 +3367,7 @@ pub fn timeStamp(
     _: *JSGlobalObject,
     // args
     _: *ScriptArguments,
-) callconv(.C) void {}
+) callconv(JSC.conv) void {}
 pub fn record(
     // console
     _: ConsoleObject.Type,
@@ -3127,7 +3375,7 @@ pub fn record(
     _: *JSGlobalObject,
     // args
     _: *ScriptArguments,
-) callconv(.C) void {}
+) callconv(JSC.conv) void {}
 pub fn recordEnd(
     // console
     _: ConsoleObject.Type,
@@ -3135,7 +3383,7 @@ pub fn recordEnd(
     _: *JSGlobalObject,
     // args
     _: *ScriptArguments,
-) callconv(.C) void {}
+) callconv(JSC.conv) void {}
 pub fn screenshot(
     // console
     _: ConsoleObject.Type,
@@ -3143,62 +3391,20 @@ pub fn screenshot(
     _: *JSGlobalObject,
     // args
     _: *ScriptArguments,
-) callconv(.C) void {}
-
-pub const Export = shim.exportFunctions(.{
-    .messageWithTypeAndLevel = messageWithTypeAndLevel,
-    .count = count,
-    .countReset = countReset,
-    .time = time,
-    .timeLog = timeLog,
-    .timeEnd = timeEnd,
-    .profile = profile,
-    .profileEnd = profileEnd,
-    .takeHeapSnapshot = takeHeapSnapshot,
-    .timeStamp = timeStamp,
-    .record = record,
-    .recordEnd = recordEnd,
-    .screenshot = screenshot,
-});
+) callconv(JSC.conv) void {}
 
 comptime {
-    @export(messageWithTypeAndLevel, .{
-        .name = Export[0].symbol_name,
-    });
-    @export(count, .{
-        .name = Export[1].symbol_name,
-    });
-    @export(countReset, .{
-        .name = Export[2].symbol_name,
-    });
-    @export(time, .{
-        .name = Export[3].symbol_name,
-    });
-    @export(timeLog, .{
-        .name = Export[4].symbol_name,
-    });
-    @export(timeEnd, .{
-        .name = Export[5].symbol_name,
-    });
-    @export(profile, .{
-        .name = Export[6].symbol_name,
-    });
-    @export(profileEnd, .{
-        .name = Export[7].symbol_name,
-    });
-    @export(takeHeapSnapshot, .{
-        .name = Export[8].symbol_name,
-    });
-    @export(timeStamp, .{
-        .name = Export[9].symbol_name,
-    });
-    @export(record, .{
-        .name = Export[10].symbol_name,
-    });
-    @export(recordEnd, .{
-        .name = Export[11].symbol_name,
-    });
-    @export(screenshot, .{
-        .name = Export[12].symbol_name,
-    });
+    @export(messageWithTypeAndLevel, .{ .name = shim.symbolName("messageWithTypeAndLevel") });
+    @export(count, .{ .name = shim.symbolName("count") });
+    @export(countReset, .{ .name = shim.symbolName("countReset") });
+    @export(time, .{ .name = shim.symbolName("time") });
+    @export(timeLog, .{ .name = shim.symbolName("timeLog") });
+    @export(timeEnd, .{ .name = shim.symbolName("timeEnd") });
+    @export(profile, .{ .name = shim.symbolName("profile") });
+    @export(profileEnd, .{ .name = shim.symbolName("profileEnd") });
+    @export(takeHeapSnapshot, .{ .name = shim.symbolName("takeHeapSnapshot") });
+    @export(timeStamp, .{ .name = shim.symbolName("timeStamp") });
+    @export(record, .{ .name = shim.symbolName("record") });
+    @export(recordEnd, .{ .name = shim.symbolName("recordEnd") });
+    @export(screenshot, .{ .name = shim.symbolName("screenshot") });
 }

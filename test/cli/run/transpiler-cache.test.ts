@@ -1,8 +1,7 @@
-import assert from "assert";
 import { Subprocess } from "bun";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { realpathSync, chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "fs";
-import { bunEnv, bunExe, bunRun } from "harness";
+import { bunEnv, bunExe, bunRun, tmpdirSync } from "harness";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -51,7 +50,7 @@ beforeEach(() => {
     removeCache();
   }
 
-  temp_dir = join(tmpdir(), `bun-test-transpiler-cache-${Date.now()}-` + (Math.random() * 81023).toString(36).slice(2));
+  temp_dir = tmpdirSync();
   mkdirSync(temp_dir, { recursive: true });
   temp_dir = realpathSync(temp_dir);
   cache_dir = join(temp_dir, ".cache");
@@ -63,7 +62,7 @@ describe("transpiler cache", () => {
     writeFileSync(join(temp_dir, "a.js"), dummyFile((50 * 1024 * 1.5) | 0, "1", "a"));
     const a = bunRun(join(temp_dir, "a.js"), env);
     expect(a.stdout == "a");
-    assert(existsSync(cache_dir));
+    expect(existsSync(cache_dir)).toBeTrue();
     expect(newCacheCount()).toBe(1);
     const b = bunRun(join(temp_dir, "a.js"), env);
     expect(b.stdout == "a");
@@ -73,7 +72,7 @@ describe("transpiler cache", () => {
     writeFileSync(join(temp_dir, "a.js"), "//" + "a".repeat(50 * 1024 * 1.5));
     const a = bunRun(join(temp_dir, "a.js"), env);
     expect(a.stdout == "");
-    assert(existsSync(cache_dir));
+    expect(existsSync(cache_dir)).toBeTrue();
     expect(newCacheCount()).toBe(1);
     const b = bunRun(join(temp_dir, "a.js"), env);
     expect(b.stdout == "");
@@ -83,7 +82,7 @@ describe("transpiler cache", () => {
     writeFileSync(join(temp_dir, "a.js"), dummyFile(50 * 1024 - 1, "1", "a"));
     const a = bunRun(join(temp_dir, "a.js"), env);
     expect(a.stdout == "a");
-    assert(!existsSync(cache_dir));
+    expect(!existsSync(cache_dir)).toBeTrue();
   });
   test("it is indeed content addressable", async () => {
     writeFileSync(join(temp_dir, "a.js"), dummyFile(50 * 1024, "1", "b"));
@@ -132,7 +131,7 @@ describe("transpiler cache", () => {
 
     await Promise.all(processes.map(x => x.exited));
 
-    assert(!killing);
+    expect(!killing).toBeTrue();
 
     remover.kill(9);
 
@@ -177,7 +176,7 @@ describe("transpiler cache", () => {
     );
     const a = bunRun(join(temp_dir, "a.js"), { ...env, NODE_ENV: undefined, HELLO: "1" });
     expect(a.stdout == "development 1");
-    assert(existsSync(cache_dir));
+    expect(existsSync(cache_dir)).toBeTrue();
     expect(newCacheCount()).toBe(1);
     const b = bunRun(join(temp_dir, "a.js"), { ...env, NODE_ENV: "production", HELLO: "5" });
     expect(b.stdout == "production 5");

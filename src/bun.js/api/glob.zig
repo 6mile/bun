@@ -40,40 +40,7 @@ const ScanOpts = struct {
     error_on_broken_symlinks: bool,
 
     fn parseCWD(globalThis: *JSGlobalObject, allocator: std.mem.Allocator, cwdVal: JSC.JSValue, absolute: bool, comptime fnName: string) ?[]const u8 {
-        const cwd_str_raw = cwd_str_raw: {
-            // Windows wants utf-16
-            if (comptime bun.Environment.isWindows) {
-                const cwd_zig_str = cwdVal.getZigString(globalThis);
-                // Dupe if already utf-16
-                if (cwd_zig_str.is16Bit()) {
-                    const duped = allocator.dupe(u8, cwd_zig_str.slice()) catch {
-                        globalThis.throwOutOfMemory();
-                        return null;
-                    };
-
-                    break :cwd_str_raw ZigString.Slice.from(duped, allocator);
-                }
-
-                // Conver to utf-16
-                const utf16 = bun.strings.toUTF16AllocForReal(
-                    allocator,
-                    cwd_zig_str.slice(),
-                    // Let windows APIs handle errors with invalid surrogate pairs, etc.
-                    false,
-                    false,
-                ) catch {
-                    globalThis.throwOutOfMemory();
-                    return null;
-                };
-
-                const ptr: [*]u8 = @ptrCast(utf16.ptr);
-                break :cwd_str_raw ZigString.Slice.from(ptr[0 .. utf16.len * 2], allocator);
-            }
-
-            // `.toSlice()` internally converts to WTF-8
-            break :cwd_str_raw cwdVal.toSlice(globalThis, allocator);
-        };
-
+        const cwd_str_raw = cwdVal.toSlice(globalThis, allocator);
         if (cwd_str_raw.len == 0) return "";
 
         const cwd_str = cwd_str: {
@@ -97,7 +64,7 @@ const ScanOpts = struct {
             }
 
             // Convert to an absolute path
-            var path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+            var path_buf: bun.PathBuffer = undefined;
             const cwd = switch (bun.sys.getcwd((&path_buf))) {
                 .result => |cwd| cwd,
                 .err => |err| {
@@ -207,7 +174,7 @@ pub const WalkTask = struct {
         pub fn toJSC(this: Err, globalThis: *JSGlobalObject) JSValue {
             return switch (this) {
                 .syscall => |err| err.toJSC(globalThis),
-                .unknown => |err| ZigString.fromBytes(@errorName(err)).toValueGC(globalThis),
+                .unknown => |err| ZigString.fromBytes(@errorName(err)).toJS(globalThis),
             };
         }
     };
@@ -264,12 +231,11 @@ pub const WalkTask = struct {
 };
 
 fn globWalkResultToJS(globWalk: *GlobWalker, globalThis: *JSGlobalObject) JSValue {
-    // if (globWalk.matchedPaths.items.len >= 0) {
-    if (globWalk.matchedPaths.items.len == 0) {
-        return JSC.JSArray.from(globalThis, &[_]JSC.JSValue{});
+    if (globWalk.matchedPaths.keys().len == 0) {
+        return JSC.JSValue.createEmptyArray(globalThis, 0);
     }
 
-    return BunString.toJSArray(globalThis, globWalk.matchedPaths.items[0..]);
+    return BunString.toJSArray(globalThis, globWalk.matchedPaths.keys());
 }
 
 /// The reference to the arena is not used after the scope because it is copied
@@ -351,7 +317,7 @@ fn makeGlobWalker(
 pub fn constructor(
     globalThis: *JSC.JSGlobalObject,
     callframe: *JSC.CallFrame,
-) callconv(.C) ?*Glob {
+) ?*Glob {
     const alloc = getAllocator(globalThis);
 
     const arguments_ = callframe.arguments(1);
@@ -371,7 +337,7 @@ pub fn constructor(
 
     const all_ascii = isAllAscii(pat_str);
 
-    var glob = alloc.create(Glob) catch @panic("OOM");
+    var glob = alloc.create(Glob) catch bun.outOfMemory();
     glob.* = .{ .pattern = pat_str, .is_ascii = all_ascii };
 
     if (!all_ascii) {
@@ -404,21 +370,21 @@ pub fn finalize(
 }
 
 pub fn hasPendingActivity(this: *Glob) callconv(.C) bool {
-    @fence(.SeqCst);
-    return this.has_pending_activity.load(.SeqCst) > 0;
+    @fence(.seq_cst);
+    return this.has_pending_activity.load(.seq_cst) > 0;
 }
 
 fn incrPendingActivityFlag(has_pending_activity: *std.atomic.Value(usize)) void {
-    @fence(.SeqCst);
-    _ = has_pending_activity.fetchAdd(1, .SeqCst);
+    @fence(.seq_cst);
+    _ = has_pending_activity.fetchAdd(1, .seq_cst);
 }
 
 fn decrPendingActivityFlag(has_pending_activity: *std.atomic.Value(usize)) void {
-    @fence(.SeqCst);
-    _ = has_pending_activity.fetchSub(1, .SeqCst);
+    @fence(.seq_cst);
+    _ = has_pending_activity.fetchSub(1, .seq_cst);
 }
 
-pub fn __scan(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
+pub fn __scan(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFrame) JSC.JSValue {
     const alloc = getAllocator(globalThis);
 
     const arguments_ = callframe.arguments(1);
@@ -442,7 +408,7 @@ pub fn __scan(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFram
     return task.promise.value();
 }
 
-pub fn __scanSync(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
+pub fn __scanSync(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFrame) JSC.JSValue {
     const alloc = getAllocator(globalThis);
 
     const arguments_ = callframe.arguments(1);
@@ -472,7 +438,7 @@ pub fn __scanSync(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.Call
     return matchedPaths;
 }
 
-pub fn match(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
+pub fn match(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFrame) JSC.JSValue {
     const alloc = getAllocator(globalThis);
     var arena = Arena.init(alloc);
     defer arena.deinit();

@@ -15,7 +15,7 @@ pub const DiffFormatter = struct {
     expected_string: ?string = null,
     received: ?JSValue = null,
     expected: ?JSValue = null,
-    globalObject: *JSGlobalObject,
+    globalThis: *JSGlobalObject,
     not: bool = false,
 
     pub fn format(this: DiffFormatter, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
@@ -100,10 +100,11 @@ pub const DiffFormatter = struct {
                 .flush = false,
                 .ordered_properties = true,
                 .quote_strings = true,
+                .max_depth = 100,
             };
-            ConsoleObject.format(
+            ConsoleObject.format2(
                 .Debug,
-                this.globalObject,
+                this.globalThis,
                 @as([*]const JSValue, @ptrCast(&received)),
                 1,
                 Writer,
@@ -115,9 +116,9 @@ pub const DiffFormatter = struct {
 
             buffered_writer_.context = &expected_buf;
 
-            ConsoleObject.format(
+            ConsoleObject.format2(
                 .Debug,
-                this.globalObject,
+                this.globalThis,
                 @as([*]const JSValue, @ptrCast(&this.expected)),
                 1,
                 Writer,
@@ -141,21 +142,21 @@ pub const DiffFormatter = struct {
             return;
         }
 
-        switch (received.determineDiffMethod(expected, this.globalObject)) {
+        switch (received.determineDiffMethod(expected, this.globalThis)) {
             .none => {
                 const fmt = "Expected: <green>{any}<r>\nReceived: <red>{any}<r>";
-                var formatter = ConsoleObject.Formatter{ .globalThis = this.globalObject, .quote_strings = true };
+                var formatter = ConsoleObject.Formatter{ .globalThis = this.globalThis, .quote_strings = true };
                 if (Output.enable_ansi_colors) {
                     try writer.print(Output.prettyFmt(fmt, true), .{
-                        expected.toFmt(this.globalObject, &formatter),
-                        received.toFmt(this.globalObject, &formatter),
+                        expected.toFmt(this.globalThis, &formatter),
+                        received.toFmt(this.globalThis, &formatter),
                     });
                     return;
                 }
 
                 try writer.print(Output.prettyFmt(fmt, true), .{
-                    expected.toFmt(this.globalObject, &formatter),
-                    received.toFmt(this.globalObject, &formatter),
+                    expected.toFmt(this.globalThis, &formatter),
+                    received.toFmt(this.globalThis, &formatter),
                 });
                 return;
             },

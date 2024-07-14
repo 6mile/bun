@@ -9,9 +9,10 @@ const stringZ = bun.stringZ;
 const default_allocator = bun.default_allocator;
 const C = bun.C;
 const std = @import("std");
+const Progress = bun.Progress;
 
 const lex = bun.js_lexer;
-const logger = @import("root").bun.logger;
+const logger = bun.logger;
 
 const options = @import("../options.zig");
 const js_parser = bun.js_parser;
@@ -28,24 +29,24 @@ const bundler = bun.bundler;
 
 const fs = @import("../fs.zig");
 const URL = @import("../url.zig").URL;
-const HTTP = @import("root").bun.http;
+const HTTP = bun.http;
 const ParseJSON = @import("../json_parser.zig").ParseJSONUTF8;
 const Archive = @import("../libarchive/libarchive.zig").Archive;
 const Zlib = @import("../zlib.zig");
 const JSPrinter = bun.js_printer;
 const DotEnv = @import("../env_loader.zig");
 const which = @import("../which.zig").which;
-const clap = @import("root").bun.clap;
+const clap = bun.clap;
 const Lock = @import("../lock.zig").Lock;
-const Headers = @import("root").bun.http.Headers;
+const Headers = bun.http.Headers;
 const CopyFile = @import("../copy_file.zig");
 
 pub var initialized_store = false;
 pub fn initializeStore() void {
     if (initialized_store) return;
     initialized_store = true;
-    js_ast.Expr.Data.Store.create(default_allocator);
-    js_ast.Stmt.Data.Store.create(default_allocator);
+    js_ast.Expr.Data.Store.create();
+    js_ast.Stmt.Data.Store.create();
 }
 
 pub const Version = struct {
@@ -69,7 +70,7 @@ pub const Version = struct {
                             ),
                         ),
                     },
-                ) catch unreachable;
+                ) catch bun.outOfMemory();
             }
             return this.tag;
         }
@@ -97,12 +98,12 @@ pub const Version = struct {
 
     const current_version: string = "bun-v" ++ Global.package_json_version;
 
-    pub export const Bun__githubURL: [*:0]const u8 = std.fmt.comptimePrint("https://github.com/oven-sh/bun/release/bun-v{s}/{s}", .{
+    pub export const Bun__githubURL: [*:0]const u8 = std.fmt.comptimePrint("https://github.com/oven-sh/bun/releases/download/bun-v{s}/{s}", .{
         Global.package_json_version,
         zip_filename,
     });
 
-    pub const Bun__githubBaselineURL: [:0]const u8 = std.fmt.comptimePrint("https://github.com/oven-sh/bun/release/bun-v{s}/{s}", .{
+    pub const Bun__githubBaselineURL: [:0]const u8 = std.fmt.comptimePrint("https://github.com/oven-sh/bun/releases/download/bun-v{s}/{s}", .{
         Global.package_json_version,
         baseline_zip_filename,
     });
@@ -117,13 +118,12 @@ pub const Version = struct {
 };
 
 pub const UpgradeCheckerThread = struct {
-    var update_checker_thread: std.Thread = undefined;
     pub fn spawn(env_loader: *DotEnv.Loader) void {
         if (env_loader.map.get("BUN_DISABLE_UPGRADE_CHECK") != null or
             env_loader.map.get("CI") != null or
             strings.eqlComptime(env_loader.get("BUN_CANARY") orelse "0", "1"))
             return;
-        update_checker_thread = std.Thread.spawn(.{}, run, .{env_loader}) catch return;
+        var update_checker_thread = std.Thread.spawn(.{}, run, .{env_loader}) catch return;
         update_checker_thread.detach();
     }
 
@@ -133,13 +133,14 @@ pub const UpgradeCheckerThread = struct {
         std.time.sleep(std.time.ns_per_ms * delay);
 
         Output.Source.configureThread();
-        HTTP.HTTPThread.init() catch unreachable;
+        HTTP.HTTPThread.init();
 
         defer {
             js_ast.Expr.Data.Store.deinit();
             js_ast.Stmt.Data.Store.deinit();
         }
-        var version = (try UpgradeCommand.getLatestVersion(default_allocator, env_loader, undefined, undefined, false, true)) orelse return;
+
+        var version = (try UpgradeCommand.getLatestVersion(default_allocator, env_loader, null, null, false, true)) orelse return;
 
         if (!version.isCurrent()) {
             if (version.name()) |name| {
@@ -154,7 +155,8 @@ pub const UpgradeCheckerThread = struct {
     fn run(env_loader: *DotEnv.Loader) void {
         _run(env_loader) catch |err| {
             if (Environment.isDebug) {
-                std.debug.print("\n[UpgradeChecker] ERROR: {s}\n", .{@errorName(err)});
+                Output.prettyError("\n[UpgradeChecker] ERROR: {s}\n", .{@errorName(err)});
+                Output.flush();
             }
         };
     }
@@ -163,16 +165,16 @@ pub const UpgradeCheckerThread = struct {
 pub const UpgradeCommand = struct {
     pub const timeout: u32 = 30000;
     const default_github_headers: string = "Acceptapplication/vnd.github.v3+json";
-    var github_repository_url_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-    var current_executable_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-    var unzip_path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-    var tmpdir_path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+    var github_repository_url_buf: bun.PathBuffer = undefined;
+    var current_executable_buf: bun.PathBuffer = undefined;
+    var unzip_path_buf: bun.PathBuffer = undefined;
+    var tmpdir_path_buf: bun.PathBuffer = undefined;
 
     pub fn getLatestVersion(
         allocator: std.mem.Allocator,
         env_loader: *DotEnv.Loader,
-        refresher: *std.Progress,
-        progress: *std.Progress.Node,
+        refresher: ?*Progress,
+        progress: ?*Progress.Node,
         use_profile: bool,
         comptime silent: bool,
     ) !?Version {
@@ -210,19 +212,19 @@ pub const UpgradeCommand = struct {
             ),
         );
 
-        if (env_loader.map.get("GITHUB_ACCESS_TOKEN")) |access_token| {
+        if (env_loader.map.get("GITHUB_TOKEN") orelse env_loader.map.get("GITHUB_ACCESS_TOKEN")) |access_token| {
             if (access_token.len > 0) {
-                headers_buf = try std.fmt.allocPrint(allocator, default_github_headers ++ "Access-TokenBearer {s}", .{access_token});
+                headers_buf = try std.fmt.allocPrint(allocator, default_github_headers ++ "AuthorizationBearer {s}", .{access_token});
                 try header_entries.append(
                     allocator,
                     Headers.Kv{
                         .name = Api.StringPointer{
-                            .offset = accept.value.length + accept.value.offset,
-                            .length = @as(u32, @intCast("Access-Token".len)),
+                            .offset = accept.value.offset + accept.value.length,
+                            .length = @as(u32, @intCast("Authorization".len)),
                         },
                         .value = Api.StringPointer{
-                            .offset = @as(u32, @intCast(accept.value.length + accept.value.offset + "Access-Token".len)),
-                            .length = @as(u32, @intCast(access_token.len)),
+                            .offset = @as(u32, @intCast(accept.value.offset + accept.value.length + "Authorization".len)),
+                            .length = @as(u32, @intCast("Bearer ".len + access_token.len)),
                         },
                     },
                 );
@@ -234,7 +236,7 @@ pub const UpgradeCommand = struct {
         var metadata_body = try MutableString.init(allocator, 2048);
 
         // ensure very stable memory address
-        var async_http: *HTTP.AsyncHTTP = allocator.create(HTTP.AsyncHTTP) catch unreachable;
+        var async_http: *HTTP.AsyncHTTP = try allocator.create(HTTP.AsyncHTTP);
         async_http.* = HTTP.AsyncHTTP.initSync(
             allocator,
             .GET,
@@ -250,7 +252,7 @@ pub const UpgradeCommand = struct {
         );
         async_http.client.reject_unauthorized = env_loader.getTLSRejectUnauthorized();
 
-        if (!silent) async_http.client.progress_node = progress;
+        if (!silent) async_http.client.progress_node = progress.?;
         const response = try async_http.sendSync(true);
 
         switch (response.status_code) {
@@ -268,8 +270,8 @@ pub const UpgradeCommand = struct {
         initializeStore();
         var expr = ParseJSON(&source, &log, allocator) catch |err| {
             if (!silent) {
-                progress.end();
-                refresher.refresh();
+                progress.?.end();
+                refresher.?.refresh();
 
                 if (log.errors > 0) {
                     if (Output.enable_ansi_colors) {
@@ -277,6 +279,7 @@ pub const UpgradeCommand = struct {
                     } else {
                         try log.printForLogLevelWithEnableAnsiColors(Output.errorWriter(), false);
                     }
+
                     Global.exit(1);
                 } else {
                     Output.prettyErrorln("Error parsing releases from GitHub: <r><red>{s}<r>", .{@errorName(err)});
@@ -288,9 +291,9 @@ pub const UpgradeCommand = struct {
         };
 
         if (log.errors > 0) {
-            if (comptime !silent) {
-                progress.end();
-                refresher.refresh();
+            if (!silent) {
+                progress.?.end();
+                refresher.?.refresh();
 
                 if (Output.enable_ansi_colors) {
                     try log.printForLogLevelWithEnableAnsiColors(Output.errorWriter(), true);
@@ -306,9 +309,9 @@ pub const UpgradeCommand = struct {
         var version = Version{ .zip_url = "", .tag = "", .buf = metadata_body, .size = 0 };
 
         if (expr.data != .e_object) {
-            if (comptime !silent) {
-                progress.end();
-                refresher.refresh();
+            if (!silent) {
+                progress.?.end();
+                refresher.?.refresh();
 
                 const json_type: js_ast.Expr.Tag = @as(js_ast.Expr.Tag, expr.data);
                 Output.prettyErrorln("JSON error - expected an object but received {s}", .{@tagName(json_type)});
@@ -326,8 +329,8 @@ pub const UpgradeCommand = struct {
 
         if (version.tag.len == 0) {
             if (comptime !silent) {
-                progress.end();
-                refresher.refresh();
+                progress.?.end();
+                refresher.?.refresh();
 
                 Output.prettyErrorln("JSON Error parsing releases from GitHub: <r><red>tag_name<r> is missing?\n{s}", .{metadata_body.list.items});
                 Global.exit(1);
@@ -380,8 +383,8 @@ pub const UpgradeCommand = struct {
         }
 
         if (comptime !silent) {
-            progress.end();
-            refresher.refresh();
+            progress.?.end();
+            refresher.?.refresh();
             if (version.name()) |name| {
                 Output.prettyErrorln("Bun v{s} is out, but not for this platform ({s}) yet.", .{
                     name, Version.triplet,
@@ -408,6 +411,23 @@ pub const UpgradeCommand = struct {
     pub fn exec(ctx: Command.Context) !void {
         @setCold(true);
 
+        const args = bun.argv;
+        if (args.len > 2) {
+            for (args[2..]) |arg| {
+                if (!strings.contains(arg, "--")) {
+                    Output.prettyError(
+                        \\<r><red>error<r><d>:<r> This command updates Bun itself, and does not take package names.
+                        \\<blue>note<r><d>:<r> Use `bun update
+                    , .{});
+                    for (args[2..]) |arg_err| {
+                        Output.prettyError(" {s}", .{arg_err});
+                    }
+                    Output.prettyErrorln("` instead.", .{});
+                    Global.exit(1);
+                }
+            }
+        }
+
         _exec(ctx) catch |err| {
             Output.prettyErrorln(
                 \\<r>Bun upgrade failed with error: <red><b>{s}<r>
@@ -422,7 +442,7 @@ pub const UpgradeCommand = struct {
     }
 
     fn _exec(ctx: Command.Context) !void {
-        try HTTP.HTTPThread.init();
+        HTTP.HTTPThread.init();
 
         var filesystem = try fs.FileSystem.init(null);
         var env_loader: DotEnv.Loader = brk: {
@@ -433,25 +453,23 @@ pub const UpgradeCommand = struct {
         };
         env_loader.loadProcess();
 
-        var version: Version = undefined;
-
         const use_canary = brk: {
             const default_use_canary = Environment.is_canary;
 
-            if (default_use_canary and strings.containsAny(bun.argv(), "--stable"))
+            if (default_use_canary and strings.containsAny(bun.argv, "--stable"))
                 break :brk false;
 
             break :brk strings.eqlComptime(env_loader.map.get("BUN_CANARY") orelse "0", "1") or
-                strings.containsAny(bun.argv(), "--canary") or default_use_canary;
+                strings.containsAny(bun.argv, "--canary") or default_use_canary;
         };
 
-        const use_profile = strings.containsAny(bun.argv(), "--profile");
+        const use_profile = strings.containsAny(bun.argv, "--profile");
 
-        if (!use_canary) {
-            var refresher = std.Progress{};
+        const version: Version = if (!use_canary) v: {
+            var refresher = Progress{};
             var progress = refresher.start("Fetching version tags", 0);
 
-            version = (try getLatestVersion(ctx.allocator, &env_loader, &refresher, progress, use_profile, false)) orelse return;
+            const version = (try getLatestVersion(ctx.allocator, &env_loader, &refresher, progress, use_profile, false)) orelse return;
 
             progress.end();
             refresher.refresh();
@@ -477,28 +495,28 @@ pub const UpgradeCommand = struct {
             }
 
             if (!Environment.is_canary) {
-                Output.prettyErrorln("<r><b>Bun <cyan>v{s}<r> is out<r>! You're on <blue>{s}<r>\n", .{ version.name().?, Global.package_json_version });
+                Output.prettyErrorln("<r><b>Bun <cyan>v{s}<r> is out<r>! You're on <blue>v{s}<r>\n", .{ version.name().?, Global.package_json_version });
             } else {
                 Output.prettyErrorln("<r><b>Downgrading from Bun <blue>{s}-canary<r> to Bun <cyan>v{s}<r><r>\n", .{ Global.package_json_version, version.name().? });
             }
             Output.flush();
-        } else {
-            version = Version{
-                .tag = "canary",
-                .zip_url = "https://github.com/oven-sh/bun/releases/download/canary/" ++ Version.zip_filename,
-                .size = 0,
-                .buf = MutableString.initEmpty(bun.default_allocator),
-            };
-        }
+
+            break :v version;
+        } else Version{
+            .tag = "canary",
+            .zip_url = "https://github.com/oven-sh/bun/releases/download/canary/" ++ Version.zip_filename,
+            .size = 0,
+            .buf = MutableString.initEmpty(bun.default_allocator),
+        };
 
         const zip_url = URL.parse(version.zip_url);
         const http_proxy: ?URL = env_loader.getHttpProxy(zip_url);
 
         {
-            var refresher = std.Progress{};
+            var refresher = Progress{};
             var progress = refresher.start("Downloading", version.size);
             refresher.refresh();
-            var async_http = ctx.allocator.create(HTTP.AsyncHTTP) catch unreachable;
+            var async_http = try ctx.allocator.create(HTTP.AsyncHTTP);
             var zip_file_buffer = try ctx.allocator.create(MutableString);
             zip_file_buffer.* = try MutableString.init(ctx.allocator, @max(version.size, 1024));
 
@@ -557,14 +575,18 @@ pub const UpgradeCommand = struct {
 
             const version_name = version.name().?;
 
-            var save_dir_ = filesystem.tmpdir();
-            const save_dir_it = save_dir_.makeOpenPath(version_name, .{}) catch {
-                Output.prettyErrorln("<r><red>error:<r> Failed to open temporary directory", .{});
+            var save_dir_ = filesystem.tmpdir() catch |err| {
+                Output.errGeneric("Failed to open temporary directory: {s}", .{@errorName(err)});
+                Global.exit(1);
+            };
+
+            const save_dir_it = save_dir_.makeOpenPath(version_name, .{}) catch |err| {
+                Output.errGeneric("Failed to open temporary directory: {s}", .{@errorName(err)});
                 Global.exit(1);
             };
             const save_dir = save_dir_it;
-            const tmpdir_path = bun.getFdPath(save_dir.fd, &tmpdir_path_buf) catch {
-                Output.prettyErrorln("<r><red>error:<r> Failed to read temporary directory", .{});
+            const tmpdir_path = bun.getFdPath(save_dir.fd, &tmpdir_path_buf) catch |err| {
+                Output.errGeneric("Failed to read temporary directory: {s}", .{@errorName(err)});
                 Global.exit(1);
             };
 
@@ -613,7 +635,7 @@ pub const UpgradeCommand = struct {
                         tmpname,
                     };
 
-                    var unzip_process = std.ChildProcess.init(&unzip_argv, ctx.allocator);
+                    var unzip_process = std.process.Child.init(&unzip_argv, ctx.allocator);
                     unzip_process.cwd = tmpdir_path;
                     unzip_process.stdin_behavior = .Inherit;
                     unzip_process.stdout_behavior = .Inherit;
@@ -641,8 +663,21 @@ pub const UpgradeCommand = struct {
                         },
                     );
 
+                    var buf: bun.PathBuffer = undefined;
+                    const powershell_path =
+                        bun.which(&buf, bun.getenvZ("PATH") orelse "", "", "powershell") orelse
+                        hardcoded_system_powershell: {
+                        const system_root = bun.getenvZ("SystemRoot") orelse "C:\\Windows";
+                        const hardcoded_system_powershell = bun.path.joinAbsStringBuf(system_root, &buf, &.{ system_root, "System32\\WindowsPowerShell\\v1.0\\powershell.exe" }, .windows);
+                        if (bun.sys.exists(hardcoded_system_powershell)) {
+                            break :hardcoded_system_powershell hardcoded_system_powershell;
+                        }
+                        Output.prettyErrorln("<r><red>error:<r> Failed to unzip {s} due to PowerShell not being installed.", .{tmpname});
+                        Global.exit(1);
+                    };
+
                     var unzip_argv = [_]string{
-                        "powershell.exe",
+                        powershell_path,
                         "-NoProfile",
                         "-ExecutionPolicy",
                         "Bypass",
@@ -650,24 +685,26 @@ pub const UpgradeCommand = struct {
                         unzip_script,
                     };
 
-                    var unzip_process = std.ChildProcess.init(&unzip_argv, ctx.allocator);
+                    _ = (bun.spawnSync(&.{
+                        .argv = &unzip_argv,
 
-                    unzip_process.cwd = tmpdir_path;
-                    unzip_process.stdin_behavior = .Inherit;
-                    unzip_process.stdout_behavior = .Inherit;
-                    unzip_process.stderr_behavior = .Inherit;
+                        .envp = null,
+                        .cwd = tmpdir_path,
 
-                    const unzip_result = unzip_process.spawnAndWait() catch |err| {
-                        save_dir.deleteFileZ(tmpname) catch {};
-                        Output.prettyErrorln("<r><red>error:<r> Failed to spawn unzip due to {s}.", .{@errorName(err)});
+                        .stderr = .inherit,
+                        .stdout = .inherit,
+                        .stdin = .inherit,
+
+                        .windows = if (Environment.isWindows) .{
+                            .loop = bun.JSC.EventLoopHandle.init(bun.JSC.MiniEventLoop.initGlobal(null)),
+                        } else {},
+                    }) catch |err| {
+                        Output.prettyErrorln("<r><red>error:<r> Failed to spawn Expand-Archive on {s} due to error {s}", .{ tmpname, @errorName(err) });
+                        Global.exit(1);
+                    }).unwrap() catch |err| {
+                        Output.prettyErrorln("<r><red>error:<r> Failed to run Expand-Archive on {s} due to error {s}", .{ tmpname, @errorName(err) });
                         Global.exit(1);
                     };
-
-                    if (unzip_result.Exited != 0) {
-                        Output.prettyErrorln("<r><red>Unzip failed<r> (exit code: {d})", .{unzip_result.Exited});
-                        save_dir.deleteFileZ(tmpname) catch {};
-                        Global.exit(1);
-                    }
                 }
             }
             {
@@ -676,7 +713,7 @@ pub const UpgradeCommand = struct {
                     "--version",
                 };
 
-                const result = std.ChildProcess.run(.{
+                const result = std.process.Child.run(.{
                     .allocator = ctx.allocator,
                     .argv = &verify_argv,
                     .cwd = tmpdir_path,
@@ -740,12 +777,13 @@ pub const UpgradeCommand = struct {
                 }
             }
 
-            const destination_executable_ = std.fs.selfExePath(&current_executable_buf) catch return error.UpgradeFailedMissingExecutable;
-            current_executable_buf[destination_executable_.len] = 0;
+            const destination_executable = bun.selfExePath() catch return error.UpgradeFailedMissingExecutable;
+            @memcpy((&current_executable_buf).ptr, destination_executable);
+            current_executable_buf[destination_executable.len] = 0;
 
-            const target_filename_ = std.fs.path.basename(destination_executable_);
-            const target_filename = current_executable_buf[destination_executable_.len - target_filename_.len ..][0..target_filename_.len :0];
-            const target_dir_ = std.fs.path.dirname(destination_executable_) orelse return error.UpgradeFailedBecauseOfMissingExecutableDir;
+            const target_filename_ = std.fs.path.basename(destination_executable);
+            const target_filename = current_executable_buf[destination_executable.len - target_filename_.len ..][0..target_filename_.len :0];
+            const target_dir_ = std.fs.path.dirname(destination_executable) orelse return error.UpgradeFailedBecauseOfMissingExecutableDir;
             // safe because the slash will no longer be in use
             current_executable_buf[target_dir_.len] = 0;
             const target_dirname = current_executable_buf[0..target_dir_.len :0];
@@ -813,7 +851,7 @@ pub const UpgradeCommand = struct {
                         target_dirname,
                         target_filename,
                     });
-                    std.os.rename(destination_executable_, outdated_filename.?) catch |err| {
+                    std.posix.rename(destination_executable, outdated_filename.?) catch |err| {
                         save_dir_.deleteTree(version_name) catch {};
                         Output.prettyErrorln("<r><red>error:<r> Failed to rename current executable {s}", .{@errorName(err)});
                         Global.exit(1);
@@ -826,11 +864,14 @@ pub const UpgradeCommand = struct {
 
                     if (comptime Environment.isWindows) {
                         // Attempt to restore the old executable. If this fails, the user will be left without a working copy of bun.
-                        std.os.rename(outdated_filename.?, destination_executable_) catch {
+                        std.posix.rename(outdated_filename.?, destination_executable) catch {
                             Output.errGeneric(
-                                \\Failed to move new version of Bun due to {s}
+                                \\Failed to move new version of Bun to {s} due to {s}
                             ,
-                                .{@errorName(err)},
+                                .{
+                                    destination_executable,
+                                    @errorName(err),
+                                },
                             );
                             Output.errGeneric(
                                 \\Failed to restore the working copy of Bun. The installation is now corrupt.
@@ -846,13 +887,17 @@ pub const UpgradeCommand = struct {
                     }
 
                     Output.errGeneric(
-                        \\Failed to move new version of Bun due to {s}
+                        \\Failed to move new version of Bun to {s} to {s}
                         \\
                         \\Please reinstall Bun manually with the following command:
                         \\   {s}
                         \\
                     ,
-                        .{ @errorName(err), manual_upgrade_command },
+                        .{
+                            destination_executable,
+                            @errorName(err),
+                            manual_upgrade_command,
+                        },
                     );
                     Global.exit(1);
                 };
@@ -865,15 +910,16 @@ pub const UpgradeCommand = struct {
                     "completions",
                 };
 
-                env_loader.map.put("IS_BUN_AUTO_UPDATE", "true") catch unreachable;
-                var buf_map = try env_loader.map.cloneToEnvMap(ctx.allocator);
-                _ = std.ChildProcess.run(.{
+                env_loader.map.put("IS_BUN_AUTO_UPDATE", "true") catch bun.outOfMemory();
+                var std_map = try env_loader.map.stdEnvMap(ctx.allocator);
+                defer std_map.deinit();
+                _ = std.process.Child.run(.{
                     .allocator = ctx.allocator,
                     .argv = &completions_argv,
                     .cwd = target_dirname,
                     .max_output_bytes = 4096,
-                    .env_map = &buf_map,
-                }) catch undefined;
+                    .env_map = std_map.get(),
+                }) catch {};
             }
 
             Output.printStartEnd(ctx.start_time, std.time.nanoTimestamp());
@@ -903,20 +949,20 @@ pub const UpgradeCommand = struct {
                     \\
                     \\<b><green>Welcome to Bun v{s}!<r>
                     \\
+                    \\What's new in Bun v{s}:
+                    \\
+                    \\    <cyan>https://bun.sh/blog/release-notes/{s}<r>
+                    \\
                     \\Report any bugs:
                     \\
                     \\    https://github.com/oven-sh/bun/issues
                     \\
-                    \\What's new:
-                    \\
-                    \\    <cyan>https://github.com/oven-sh/bun/releases/tag/{s}<r>
-                    \\
-                    \\Changelog:
+                    \\Commit log:
                     \\
                     \\    https://github.com/oven-sh/bun/compare/{s}...{s}
                     \\
                 ,
-                    .{ version_name, version.tag, bun_v, version.tag },
+                    .{ version_name, version_name, version.tag, bun_v, version.tag },
                 );
             }
 
@@ -924,48 +970,97 @@ pub const UpgradeCommand = struct {
 
             if (Environment.isWindows) {
                 if (outdated_filename) |to_remove| {
-                    current_executable_buf[target_dir_.len] = '\\';
-                    const delete_old_script = try std.fmt.allocPrint(
-                        ctx.allocator,
-                        // What is this?
-                        // 1. spawns powershell
-                        // 2. waits for all processes with the same path as the current executable to exit (including the current process)
-                        // 3. deletes the old executable
-                        //
-                        // probably possible to hit a race condition, but i think the worst case is simply the file not getting deleted.
-                        //
-                        // in that edge case, the next time you upgrade it will simply override itself, fixing the bug.
-                        //
-                        // -NoNewWindow doesnt work, will keep the parent alive it seems
-                        // -WindowStyle Hidden seems to just do nothing, not sure why.
-                        // Using -WindowStyle Minimized seems to work, but you can spot a powershell icon appear in your taskbar for about ~1 second
-                        //
-                        // Alternative: we could simply do nothing and leave the `.outdated` file.
-                        \\Start-Process powershell.exe -WindowStyle Minimized -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-Command",'&{{$ErrorActionPreference=''SilentlyContinue''; Get-Process|Where-Object{{ $_.Path -eq ''{s}'' }}|Wait-Process; Remove-Item -Path ''{s}'' -Force }};'; exit
-                    ,
-                        .{
-                            destination_executable_,
-                            to_remove,
-                        },
-                    );
-
-                    var delete_argv = [_]string{
-                        "powershell.exe",
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        delete_old_script,
-                    };
-
-                    _ = std.ChildProcess.run(.{
-                        .allocator = ctx.allocator,
-                        .argv = &delete_argv,
-                        .cwd = tmpdir_path,
-                        .max_output_bytes = 512,
-                    }) catch {};
+                    // TODO: this file gets left on disk
+                    //
+                    // We should remove it, however we cannot remove an exe that is still running.
+                    // A prior approach was to spawn a subprocess to remove the file, but that
+                    // would open a terminal window, which steals user focus (even if minimized).
+                    _ = to_remove;
                 }
             }
         }
+    }
+};
+
+pub const upgrade_js_bindings = struct {
+    const JSC = bun.JSC;
+    const JSValue = JSC.JSValue;
+    const ZigString = JSC.ZigString;
+
+    var tempdir_fd: ?bun.FileDescriptor = null;
+
+    pub fn generate(global: *JSC.JSGlobalObject) JSC.JSValue {
+        const obj = JSValue.createEmptyObject(global, 3);
+        const open = ZigString.static("openTempDirWithoutSharingDelete");
+        obj.put(global, open, JSC.createCallback(global, open, 1, jsOpenTempDirWithoutSharingDelete));
+        const close = ZigString.static("closeTempDirHandle");
+        obj.put(global, close, JSC.createCallback(global, close, 1, jsCloseTempDirHandle));
+        return obj;
+    }
+
+    /// For testing upgrades when the temp directory has an open handle without FILE_SHARE_DELETE.
+    /// Windows only
+    pub fn jsOpenTempDirWithoutSharingDelete(_: *JSC.JSGlobalObject, _: *JSC.CallFrame) bun.JSC.JSValue {
+        if (comptime !Environment.isWindows) return .undefined;
+        const w = std.os.windows;
+
+        var buf: bun.WPathBuffer = undefined;
+        const tmpdir_path = fs.FileSystem.RealFS.getDefaultTempDir();
+        const path = switch (bun.sys.normalizePathWindows(u8, bun.invalid_fd, tmpdir_path, &buf)) {
+            .err => return .undefined,
+            .result => |norm| norm,
+        };
+
+        const path_len_bytes: u16 = @truncate(path.len * 2);
+        var nt_name = std.os.windows.UNICODE_STRING{
+            .Length = path_len_bytes,
+            .MaximumLength = path_len_bytes,
+            .Buffer = @constCast(path.ptr),
+        };
+
+        var attr = std.os.windows.OBJECT_ATTRIBUTES{
+            .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
+            .RootDirectory = null,
+            .Attributes = 0,
+            .ObjectName = &nt_name,
+            .SecurityDescriptor = null,
+            .SecurityQualityOfService = null,
+        };
+
+        const flags: u32 = w.STANDARD_RIGHTS_READ | w.FILE_READ_ATTRIBUTES | w.FILE_READ_EA | w.SYNCHRONIZE | w.FILE_TRAVERSE;
+
+        var fd: std.os.windows.HANDLE = std.os.windows.INVALID_HANDLE_VALUE;
+        var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+
+        const rc = std.os.windows.ntdll.NtCreateFile(
+            &fd,
+            flags,
+            &attr,
+            &io,
+            null,
+            0,
+            w.FILE_SHARE_READ | w.FILE_SHARE_WRITE,
+            w.FILE_OPEN,
+            w.FILE_DIRECTORY_FILE | w.FILE_SYNCHRONOUS_IO_NONALERT | w.FILE_OPEN_FOR_BACKUP_INTENT,
+            null,
+            0,
+        );
+
+        switch (bun.windows.Win32Error.fromNTStatus(rc)) {
+            .SUCCESS => tempdir_fd = bun.toFD(fd),
+            else => {},
+        }
+
+        return .undefined;
+    }
+
+    pub fn jsCloseTempDirHandle(_: *JSC.JSGlobalObject, _: *JSC.CallFrame) JSValue {
+        if (comptime !Environment.isWindows) return .undefined;
+
+        if (tempdir_fd) |fd| {
+            _ = bun.sys.close(fd);
+        }
+
+        return .undefined;
     }
 };

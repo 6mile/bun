@@ -45,10 +45,10 @@ pub const WriteFile = struct {
     pub usingnamespace FileOpenerMixin(WriteFile);
     pub usingnamespace FileCloserMixin(WriteFile);
 
-    pub const open_flags = std.os.O.WRONLY | std.os.O.CREAT | std.os.O.TRUNC | std.os.O.NONBLOCK;
+    pub const open_flags = bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC | bun.O.NONBLOCK;
 
     pub fn onWritable(request: *io.Request) void {
-        var this: *WriteFile = @fieldParentPtr(WriteFile, "io_request", request);
+        var this: *WriteFile = @fieldParentPtr("io_request", request);
         this.onReady();
     }
 
@@ -69,7 +69,7 @@ pub const WriteFile = struct {
     pub fn onRequestWritable(request: *io.Request) io.Action {
         bloblog("WriteFile.onRequestWritable()", .{});
         request.scheduled = false;
-        var this: *WriteFile = @fieldParentPtr(WriteFile, "io_request", request);
+        var this: *WriteFile = @fieldParentPtr("io_request", request);
         return io.Action{
             .writable = .{
                 .onError = @ptrCast(&onIOError),
@@ -83,7 +83,7 @@ pub const WriteFile = struct {
 
     pub fn waitForWritable(this: *WriteFile) void {
         this.close_after_io = true;
-        @atomicStore(@TypeOf(this.io_request.callback), &this.io_request.callback, &onRequestWritable, .SeqCst);
+        @atomicStore(@TypeOf(this.io_request.callback), &this.io_request.callback, &onRequestWritable, .seq_cst);
         if (!this.io_request.scheduled)
             io.Loop.get().schedule(&this.io_request);
     }
@@ -137,7 +137,7 @@ pub const WriteFile = struct {
         wrote: *usize,
     ) bool {
         const fd = this.opened_fd;
-        std.debug.assert(fd != invalid_fd);
+        bun.assert(fd != invalid_fd);
 
         const result: JSC.Maybe(usize) =
             // We do not use pwrite() because the file may not be
@@ -295,7 +295,7 @@ pub const WriteFile = struct {
     }
 
     fn doWriteLoopTask(task: *JSC.WorkPoolTask) void {
-        var this: *WriteFile = @fieldParentPtr(WriteFile, "task", task);
+        var this: *WriteFile = @fieldParentPtr("task", task);
         // On macOS, we use one-shot mode, so we don't need to unregister.
         if (comptime Environment.isMac) {
             this.close_after_io = false;
@@ -308,7 +308,7 @@ pub const WriteFile = struct {
     }
 
     fn doWriteLoop(this: *WriteFile) void {
-        while (this.state.load(.Monotonic) == .running) {
+        while (this.state.load(.monotonic) == .running) {
             var remain = this.bytes_blob.sharedView();
 
             remain = remain[@min(this.total_written, remain.len)..];
@@ -398,27 +398,25 @@ pub const WriteFileWindows = struct {
             },
             .fd => {
                 write_file.fd = brk: {
-                    const rare = event_loop.virtual_machine.rareData();
-
-                    if (file_blob.store == rare.stdout_store) {
-                        break :brk 1;
-                    } else if (file_blob.store == rare.stderr_store) {
-                        break :brk 2;
-                    } else if (file_blob.store == rare.stdin_store) {
-                        break :brk 0;
+                    if (event_loop.virtual_machine.rare_data) |rare| {
+                        if (file_blob.store == rare.stdout_store) {
+                            break :brk 1;
+                        } else if (file_blob.store == rare.stderr_store) {
+                            break :brk 2;
+                        } else if (file_blob.store == rare.stdin_store) {
+                            break :brk 0;
+                        }
                     }
 
-                    // The file stored descriptor is not 0, 1, or 2.
-                    const fd_ = file_blob.store.?.data.file.pathlike.fd;
-
-                    break :brk @intCast(fd_.int());
+                    // The file stored descriptor is not stdin, stdout, or stderr.
+                    break :brk bun.uvfdcast(file_blob.store.?.data.file.pathlike.fd);
                 };
 
                 write_file.doWriteLoop(write_file.loop());
             },
         }
 
-        write_file.loop().refConcurrently();
+        write_file.event_loop.refConcurrently();
         return write_file;
     }
     pub const ResultType = WriteFile.ResultType;
@@ -434,7 +432,7 @@ pub const WriteFileWindows = struct {
         const rc = uv.uv_fs_open(
             this.loop(),
             &this.io_request,
-            &(std.os.toPosixPath(path) catch {
+            &(std.posix.toPosixPath(path) catch {
                 this.throw(bun.sys.Error{
                     .errno = @intFromEnum(bun.C.E.NAMETOOLONG),
                     .syscall = .open,
@@ -448,7 +446,7 @@ pub const WriteFileWindows = struct {
 
         // libuv always returns 0 when a callback is specified
         if (rc.errEnum()) |err| {
-            std.debug.assert(err != .NOENT);
+            bun.assert(err != .NOENT);
 
             this.throw(.{
                 .errno = @intFromEnum(err),
@@ -461,8 +459,8 @@ pub const WriteFileWindows = struct {
     }
 
     pub fn onOpen(req: *uv.fs_t) callconv(.C) void {
-        var this: *WriteFileWindows = @fieldParentPtr(WriteFileWindows, "io_request", req);
-        std.debug.assert(this == @as(*WriteFileWindows, @alignCast(@ptrCast(req.data.?))));
+        var this: *WriteFileWindows = @fieldParentPtr("io_request", req);
+        bun.assert(this == @as(*WriteFileWindows, @alignCast(@ptrCast(req.data.?))));
         const rc = this.io_request.result;
         if (comptime Environment.allow_assert)
             log("onOpen({s}) = {}", .{ this.file_blob.store.?.data.file.pathlike.path.slice(), rc });
@@ -485,7 +483,7 @@ pub const WriteFileWindows = struct {
             return;
         }
 
-        this.fd = @intCast(rc.value);
+        this.fd = @intCast(rc.int());
 
         // the loop must be copied
         this.doWriteLoop(this.loop());
@@ -494,7 +492,7 @@ pub const WriteFileWindows = struct {
     fn mkdirp(this: *WriteFileWindows) void {
         log("mkdirp", .{});
         this.mkdirp_if_not_exists = false;
-        this.loop().refConcurrently();
+        this.event_loop.refConcurrently();
 
         const path = this.file_blob.store.?.data.file.pathlike.path.slice();
         JSC.Node.Async.AsyncMkdirp.new(.{
@@ -507,7 +505,7 @@ pub const WriteFileWindows = struct {
     }
 
     fn onMkdirpComplete(this: *WriteFileWindows) void {
-        this.loop().unrefConcurrently();
+        this.event_loop.unrefConcurrently();
 
         if (this.err) |err| {
             this.throw(err);
@@ -520,14 +518,14 @@ pub const WriteFileWindows = struct {
 
     fn onMkdirpCompleteConcurrent(this: *WriteFileWindows, err_: JSC.Maybe(void)) void {
         log("mkdirp complete", .{});
-        std.debug.assert(this.err == null);
+        bun.assert(this.err == null);
         this.err = if (err_ == .err) err_.err else null;
         this.event_loop.enqueueTaskConcurrent(JSC.ConcurrentTask.create(JSC.ManagedTask.New(WriteFileWindows, onMkdirpComplete).init(this)));
     }
 
     fn onWriteComplete(req: *uv.fs_t) callconv(.C) void {
-        var this: *WriteFileWindows = @fieldParentPtr(WriteFileWindows, "io_request", req);
-        std.debug.assert(this == @as(*WriteFileWindows, @alignCast(@ptrCast(req.data.?))));
+        var this: *WriteFileWindows = @fieldParentPtr("io_request", req);
+        bun.assert(this == @as(*WriteFileWindows, @alignCast(@ptrCast(req.data.?))));
         const rc = this.io_request.result;
         if (rc.errno()) |err| {
             this.throw(.{
@@ -537,14 +535,15 @@ pub const WriteFileWindows = struct {
             return;
         }
 
-        this.total_written += @intCast(rc.value);
+        this.total_written += @intCast(rc.int());
         this.doWriteLoop(this.loop());
     }
 
     pub fn onFinish(container: *WriteFileWindows) void {
-        container.loop().unrefConcurrently();
+        container.event_loop.unrefConcurrently();
         var event_loop = container.event_loop;
-        defer event_loop.drainMicrotasks();
+        event_loop.enter();
+        defer event_loop.exit();
 
         // We don't need to enqueue task since this is already in a task.
         container.runFromJSThread();
@@ -567,7 +566,7 @@ pub const WriteFileWindows = struct {
     }
 
     pub fn throw(this: *WriteFileWindows, err: bun.sys.Error) void {
-        std.debug.assert(this.err == null);
+        bun.assert(this.err == null);
         this.err = err;
         this.onFinish();
     }
@@ -712,6 +711,7 @@ pub const WriteFileWaitFromLockedValueTask = struct {
                 if (new_promise.asAnyPromise()) |_promise| {
                     switch (_promise.status(globalThis.vm())) {
                         .Pending => {
+                            // Fulfill the new promise using the old promise
                             promise.resolve(
                                 globalThis,
                                 new_promise,

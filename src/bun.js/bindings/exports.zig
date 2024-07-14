@@ -1,4 +1,4 @@
-const JSC = @import("root").bun.JSC;
+const JSC = bun.JSC;
 const Fs = @import("../../fs.zig");
 const CAPI = JSC.C;
 const JS = @import("../javascript.zig");
@@ -8,11 +8,11 @@ const Api = @import("../../api/schema.zig").Api;
 const bun = @import("root").bun;
 const std = @import("std");
 const Shimmer = @import("./shimmer.zig").Shimmer;
-const strings = @import("root").bun.strings;
+const strings = bun.strings;
 const default_allocator = bun.default_allocator;
 const NewGlobalObject = JSC.NewGlobalObject;
 const JSGlobalObject = JSC.JSGlobalObject;
-const is_bindgen: bool = std.meta.globalOption("bindgen", bool) orelse false;
+const is_bindgen: bool = false;
 const ZigString = JSC.ZigString;
 const string = bun.string;
 const JSValue = JSC.JSValue;
@@ -25,7 +25,6 @@ const Exception = JSC.Exception;
 const JSModuleLoader = JSC.JSModuleLoader;
 const Microtask = JSC.Microtask;
 
-const Backtrace = @import("../../crash_reporter.zig");
 const JSPrinter = bun.js_printer;
 const JSLexer = bun.js_lexer;
 const typeBaseName = @import("../../meta.zig").typeBaseName;
@@ -45,10 +44,10 @@ pub const ZigGlobalObject = extern struct {
         console: *anyopaque,
         context_id: i32,
         mini_mode: bool,
+        eval_mode: bool,
         worker_ptr: ?*anyopaque,
     ) *JSGlobalObject {
-        const global = shim.cppFn("create", .{ console, context_id, mini_mode, worker_ptr });
-        Backtrace.reloadHandlers() catch unreachable;
+        const global = shim.cppFn("create", .{ console, context_id, mini_mode, eval_mode, worker_ptr });
         return global;
     }
 
@@ -63,26 +62,26 @@ pub const ZigGlobalObject = extern struct {
     pub fn import(global: *JSGlobalObject, specifier: *bun.String, source: *bun.String) callconv(.C) ErrorableString {
         JSC.markBinding(@src());
 
-        return @call(.always_inline, Interface.import, .{ global, specifier, source });
+        return @call(bun.callmod_inline, Interface.import, .{ global, specifier, source });
     }
     pub fn resolve(res: *ErrorableString, global: *JSGlobalObject, specifier: *bun.String, source: *bun.String, query: *ZigString) callconv(.C) void {
         JSC.markBinding(@src());
-        @call(.always_inline, Interface.resolve, .{ res, global, specifier, source, query });
+        @call(bun.callmod_inline, Interface.resolve, .{ res, global, specifier, source, query });
     }
 
     pub fn promiseRejectionTracker(global: *JSGlobalObject, promise: *JSPromise, rejection: JSPromiseRejectionOperation) callconv(.C) JSValue {
         JSC.markBinding(@src());
-        return @call(.always_inline, Interface.promiseRejectionTracker, .{ global, promise, rejection });
+        return @call(bun.callmod_inline, Interface.promiseRejectionTracker, .{ global, promise, rejection });
     }
 
     pub fn reportUncaughtException(global: *JSGlobalObject, exception: *Exception) callconv(.C) JSValue {
         JSC.markBinding(@src());
-        return @call(.always_inline, Interface.reportUncaughtException, .{ global, exception });
+        return @call(bun.callmod_inline, Interface.reportUncaughtException, .{ global, exception });
     }
 
     pub fn onCrash() callconv(.C) void {
         JSC.markBinding(@src());
-        return @call(.always_inline, Interface.onCrash, .{});
+        return @call(bun.callmod_inline, Interface.onCrash, .{});
     }
 
     pub const Export = shim.exportFunctions(
@@ -115,6 +114,10 @@ pub const ErrorCode = enum(ErrorCodeInt) {
         return @as(ErrorCode, @enumFromInt(@intFromError(code)));
     }
 
+    pub inline fn toError(self: ErrorCode) anyerror {
+        return @errorFromInt(@intFromEnum(self));
+    }
+
     pub const ParserError = @intFromEnum(ErrorCode.from(error.ParserError));
     pub const JSErrorObject = @intFromEnum(ErrorCode.from(error.JSErrorObject));
 
@@ -132,17 +135,11 @@ pub const ZigErrorType = extern struct {
 
 pub const NodePath = JSC.Node.Path;
 
-// Web Streams
-pub const JSReadableStreamBlob = JSC.WebCore.ByteBlobLoader.Source.JSReadableStreamSource;
-pub const JSReadableStreamFile = JSC.WebCore.FileReader.Source.JSReadableStreamSource;
-pub const JSReadableStreamBytes = JSC.WebCore.ByteStream.Source.JSReadableStreamSource;
-
 // Sinks
 pub const JSArrayBufferSink = JSC.WebCore.ArrayBufferSink.JSSink;
 pub const JSHTTPSResponseSink = JSC.WebCore.HTTPSResponseSink.JSSink;
 pub const JSHTTPResponseSink = JSC.WebCore.HTTPResponseSink.JSSink;
 pub const JSFileSink = JSC.WebCore.FileSink.JSSink;
-pub const JSUVStreamSink = JSC.WebCore.UVStreamSink.JSSink;
 
 // WebSocket
 pub const WebSocketHTTPClient = @import("../../http/websocket_http_client.zig").WebSocketHTTPClient;
@@ -160,6 +157,14 @@ pub fn Errorable(comptime Type: type) type {
             value: Type,
             err: ZigErrorType,
         };
+
+        pub fn unwrap(errorable: @This()) !Type {
+            if (errorable.success) {
+                return errorable.result.value;
+            } else {
+                return errorable.result.err.code.toError();
+            }
+        }
 
         pub fn value(val: Type) @This() {
             return @This(){ .result = .{ .value = val }, .success = true };
@@ -189,18 +194,31 @@ pub const ResolvedSource = extern struct {
     pub const name = "ResolvedSource";
     pub const namespace = shim.namespace;
 
+    /// Specifier's lifetime is the caller from C++
+    /// https://github.com/oven-sh/bun/issues/9521
     specifier: bun.String = bun.String.empty,
     source_code: bun.String = bun.String.empty,
+
+    /// source_url is eventually deref'd on success
     source_url: bun.String = bun.String.empty,
+
+    // this pointer is unused and shouldn't exist
     commonjs_exports: ?[*]ZigString = null,
+
+    // This field is used to indicate whether it's a CommonJS module or ESM
     commonjs_exports_len: u32 = 0,
 
     hash: u32 = 0,
 
     allocator: ?*anyopaque = null,
 
+    jsvalue_for_export: JSC.JSValue = .zero,
+
     tag: Tag = Tag.javascript,
-    needs_deref: bool = true,
+
+    /// This is for source_code
+    source_code_needs_deref: bool = true,
+    already_bundled: bool = false,
 
     pub const Tag = @import("ResolvedSourceTag").ResolvedSourceTag;
 };
@@ -211,7 +229,7 @@ export fn ZigString__free(raw: [*]const u8, len: usize, allocator_: ?*anyopaque)
     var allocator: std.mem.Allocator = @as(*std.mem.Allocator, @ptrCast(@alignCast(allocator_ orelse return))).*;
     var ptr = ZigString.init(raw[0..len]).slice().ptr;
     if (comptime Environment.allow_assert) {
-        std.debug.assert(Mimalloc.mi_is_in_heap_region(ptr));
+        bun.assert(Mimalloc.mi_is_in_heap_region(ptr));
     }
     const str = ptr[0..len];
 
@@ -221,7 +239,7 @@ export fn ZigString__free(raw: [*]const u8, len: usize, allocator_: ?*anyopaque)
 export fn ZigString__free_global(ptr: [*]const u8, len: usize) void {
     const untagged = @as(*anyopaque, @ptrFromInt(@intFromPtr(ZigString.init(ptr[0..len]).slice().ptr)));
     if (comptime Environment.allow_assert) {
-        std.debug.assert(Mimalloc.mi_is_in_heap_region(ptr));
+        bun.assert(Mimalloc.mi_is_in_heap_region(ptr));
     }
     // we must untag the string pointer
     Mimalloc.mi_free(untagged);
@@ -342,7 +360,7 @@ pub const Process = extern struct {
 
     // TODO: https://github.com/nodejs/node/blob/master/deps/uv/src/unix/darwin-proctitle.c
     pub fn setTitle(globalObject: *JSGlobalObject, _: *ZigString) callconv(.C) JSValue {
-        return ZigString.init(_bun).toValue(globalObject);
+        return ZigString.init(_bun).toJS(globalObject);
     }
 
     pub const getArgv = JSC.Node.Process.getArgv;
@@ -535,20 +553,10 @@ pub const ZigStackFrame = extern struct {
         }
 
         if (!this.source_url.isEmpty()) {
-            frame.file = try std.fmt.allocPrint(allocator, "{any}", .{this.sourceURLFormatter(root_path, origin, true, false)});
+            frame.file = try std.fmt.allocPrint(allocator, "{}", .{this.sourceURLFormatter(root_path, origin, true, false)});
         }
 
-        frame.position.source_offset = this.position.source_offset;
-
-        // For remapped code, we add 1 to the line number
-        frame.position.line = this.position.line + @as(i32, @intFromBool(this.remapped));
-
-        frame.position.line_start = this.position.line_start;
-        frame.position.line_stop = this.position.line_stop;
-        frame.position.column_start = this.position.column_start;
-        frame.position.column_stop = this.position.column_stop;
-        frame.position.expression_start = this.position.expression_start;
-        frame.position.expression_stop = this.position.expression_stop;
+        frame.position = this.position;
         frame.scope = @as(Api.StackFrameScope, @enumFromInt(@intFromEnum(this.code_type)));
 
         return frame;
@@ -562,6 +570,7 @@ pub const ZigStackFrame = extern struct {
         exclude_line_column: bool = false,
         remapped: bool = false,
         root_path: string = "",
+
         pub fn format(this: SourceURLFormatter, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             if (this.enable_color) {
                 try writer.writeAll(Output.prettyFmt("<r><cyan>", true));
@@ -589,7 +598,7 @@ pub const ZigStackFrame = extern struct {
             try writer.writeAll(source_slice);
 
             if (this.enable_color) {
-                if (this.position.line > -1) {
+                if (this.position.line.isValid()) {
                     try writer.writeAll(comptime Output.prettyFmt("<r>", true));
                 } else {
                     try writer.writeAll(comptime Output.prettyFmt("<r>", true));
@@ -597,29 +606,31 @@ pub const ZigStackFrame = extern struct {
             }
 
             if (!this.exclude_line_column) {
-                if (this.position.line > -1 and this.position.column_start > -1) {
+                if (this.position.line.isValid() and this.position.column.isValid()) {
                     if (this.enable_color) {
                         try std.fmt.format(
                             writer,
-                            // :
                             comptime Output.prettyFmt("<d>:<r><yellow>{d}<r><d>:<yellow>{d}<r>", true),
-                            .{ this.position.line + 1, this.position.column_start + 1 },
+                            .{ this.position.line.oneBased(), this.position.column.oneBased() },
                         );
                     } else {
-                        try std.fmt.format(writer, ":{d}:{d}", .{ this.position.line + 1, this.position.column_start + 1 });
+                        try std.fmt.format(writer, ":{d}:{d}", .{
+                            this.position.line.oneBased(),
+                            this.position.column.oneBased(),
+                        });
                     }
-                } else if (this.position.line > -1) {
+                } else if (this.position.line.isValid()) {
                     if (this.enable_color) {
                         try std.fmt.format(
                             writer,
                             comptime Output.prettyFmt("<d>:<r><yellow>{d}<r>", true),
                             .{
-                                this.position.line + 1,
+                                this.position.line.oneBased(),
                             },
                         );
                     } else {
                         try std.fmt.format(writer, ":{d}", .{
-                            this.position.line + 1,
+                            this.position.line.oneBased(),
                         });
                     }
                 }
@@ -698,27 +709,31 @@ pub const ZigStackFrame = extern struct {
 };
 
 pub const ZigStackFramePosition = extern struct {
-    source_offset: i32,
-    line: i32,
-    line_start: i32,
-    line_stop: i32,
-    column_start: i32,
-    column_stop: i32,
-    expression_start: i32,
-    expression_stop: i32,
+    line: bun.Ordinal,
+    column: bun.Ordinal,
+    /// -1 if not present
+    line_start_byte: c_int,
 
     pub const Invalid = ZigStackFramePosition{
-        .source_offset = -1,
-        .line = -1,
-        .line_start = -1,
-        .line_stop = -1,
-        .column_start = -1,
-        .column_stop = -1,
-        .expression_start = -1,
-        .expression_stop = -1,
+        .line = .invalid,
+        .column = .invalid,
+        .line_start_byte = -1,
     };
+
     pub fn isInvalid(this: *const ZigStackFramePosition) bool {
         return std.mem.eql(u8, std.mem.asBytes(this), std.mem.asBytes(&Invalid));
+    }
+
+    pub fn decode(reader: anytype) !@This() {
+        return .{
+            .line = bun.Ordinal.fromZeroBased(try reader.readValue(i32)),
+            .column = bun.Ordinal.fromZeroBased(try reader.readValue(i32)),
+        };
+    }
+
+    pub fn encode(this: *const @This(), writer: anytype) anyerror!void {
+        try writer.writeInt(this.line.zeroBased());
+        try writer.writeInt(this.column.zeroBased());
     }
 };
 
@@ -753,6 +768,10 @@ pub const ZigException = extern struct {
         this.name.deref();
         this.message.deref();
 
+        for (this.stack.source_lines_ptr[0..this.stack.source_lines_len]) |*line| {
+            line.deref();
+        }
+
         for (this.stack.frames_ptr[0..this.stack.frames_len]) |*frame| {
             frame.deinit();
         }
@@ -770,6 +789,7 @@ pub const ZigException = extern struct {
         frames: [frame_count]ZigStackFrame,
         loaded: bool,
         zig_exception: ZigException,
+        need_to_clear_parser_arena_on_deinit: bool = false,
 
         pub const Zero: Holder = Holder{
             .frames = brk: {
@@ -796,8 +816,11 @@ pub const ZigException = extern struct {
             return Holder.Zero;
         }
 
-        pub fn deinit(this: *Holder) void {
+        pub fn deinit(this: *Holder, vm: *JSC.VirtualMachine) void {
             this.zigException().deinit();
+            if (this.need_to_clear_parser_arena_on_deinit) {
+                vm.module_loader.resetArena(vm);
+            }
         }
 
         pub fn zigException(this: *Holder) *ZigException {
@@ -909,20 +932,98 @@ comptime {
 
         _ = Process.getTitle;
         _ = Process.setTitle;
-        Bun.Timer.shim.ref();
         NodePath.shim.ref();
-        JSReadableStreamBlob.shim.ref();
         JSArrayBufferSink.shim.ref();
         JSHTTPResponseSink.shim.ref();
         JSHTTPSResponseSink.shim.ref();
         JSFileSink.shim.ref();
-        JSUVStreamSink.shim.ref();
-        JSReadableStreamBytes.shim.ref();
-        JSReadableStreamFile.shim.ref();
+        JSFileSink.shim.ref();
         _ = ZigString__free;
         _ = ZigString__free_global;
 
         TestScope.shim.ref();
         BodyValueBuffererContext.shim.ref();
+
+        _ = Bun__LoadLibraryBunString;
     }
+}
+
+/// Returns null on error. Use windows API to lookup the actual error.
+/// The reason this function is in zig is so that we can use our own utf16-conversion functions.
+///
+/// Using characters16() does not seem to always have the sentinel. or something else
+/// broke when I just used it. Not sure. ... but this works!
+pub export fn Bun__LoadLibraryBunString(str: *bun.String) ?*anyopaque {
+    var buf: bun.WPathBuffer = undefined;
+    const data = switch (str.encoding()) {
+        .utf8 => bun.strings.convertUTF8toUTF16InBuffer(&buf, str.utf8()),
+        .utf16 => brk: {
+            @memcpy(buf[0..str.length()], str.utf16());
+            break :brk buf[0..str.length()];
+        },
+        .latin1 => brk: {
+            bun.strings.copyU8IntoU16(&buf, str.latin1());
+            break :brk buf[0..str.length()];
+        },
+    };
+    buf[data.len] = 0;
+    const LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008;
+    return bun.windows.LoadLibraryExW(buf[0..data.len :0].ptr, null, LOAD_WITH_ALTERED_SEARCH_PATH);
+}
+
+// https://github.com/nodejs/node/blob/40ef9d541ed79470977f90eb445c291b95ab75a0/lib/internal/modules/cjs/loader.js#L666
+pub export fn NodeModuleModule__findPath(
+    global: *JSGlobalObject,
+    request_bun_str: bun.String,
+    paths_maybe: ?*JSC.JSArray,
+) JSValue {
+    var stack_buf = std.heap.stackFallback(8192, default_allocator);
+    const alloc = stack_buf.get();
+
+    const request_slice = request_bun_str.toUTF8(alloc);
+    defer request_slice.deinit();
+    const request = request_slice.slice();
+
+    const absolute_request = std.fs.path.isAbsolute(request);
+    if (!absolute_request and paths_maybe == null) {
+        return .false;
+    }
+
+    // for each path
+    const found = if (paths_maybe) |paths| found: {
+        var iter = paths.iterator(global);
+        while (iter.next()) |path| {
+            const cur_path = bun.String.tryFromJS(path, global) orelse continue;
+            defer cur_path.deref();
+
+            if (findPathInner(request_bun_str, cur_path, global)) |found| {
+                break :found found;
+            }
+        }
+
+        break :found null;
+    } else findPathInner(request_bun_str, bun.String.static(""), global);
+
+    if (found) |str| {
+        return str.toJS(global);
+    }
+
+    return .false;
+}
+
+fn findPathInner(
+    request: bun.String,
+    cur_path: bun.String,
+    global: *JSGlobalObject,
+) ?bun.String {
+    var errorable: ErrorableString = undefined;
+    JSC.VirtualMachine.resolve(
+        &errorable,
+        global,
+        request,
+        cur_path,
+        null,
+        false,
+    );
+    return errorable.unwrap() catch null;
 }

@@ -23,7 +23,7 @@ declare var $overriddenName: string;
 /** ??? */
 declare var $linkTimeConstant: never;
 /** Assign to this directly above a function declaration (like a decorator) to set visibility */
-declare var $visibility: "Public" | "Private";
+declare var $visibility: "Public" | "Private" | "PrivateRecursive";
 /** ??? */
 declare var $nakedConstructor: never;
 /** Assign to this directly above a function declaration (like a decorator) to set intrinsic */
@@ -90,6 +90,7 @@ declare function $getSetIteratorInternalField(): TODO;
 declare function $getProxyInternalField(): TODO;
 declare function $idWithProfile(): TODO;
 declare function $isObject(obj: unknown): obj is object;
+declare function $isArray(obj: unknown): obj is any[];
 declare function $isCallable(fn: unknown): fn is CallableFunction;
 declare function $isConstructor(fn: unknown): fn is { new (...args: any[]): any };
 declare function $isJSArray(obj: unknown): obj is any[];
@@ -228,6 +229,7 @@ declare const $asyncContext: InternalFieldObject<[ReadonlyArray<any> | undefined
 declare var $_events: TODO;
 declare function $abortAlgorithm(): TODO;
 declare function $abortSteps(): TODO;
+declare function $addAbortAlgorithmToSignal(signal: AbortSignal, algorithm: () => void): TODO;
 declare function $addEventListener(): TODO;
 declare function $appendFromJS(): TODO;
 declare function $argv(): TODO;
@@ -254,7 +256,6 @@ declare function $closedPromise(): TODO;
 declare function $closedPromiseCapability(): TODO;
 declare function $code(): TODO;
 declare function $connect(): TODO;
-declare function $consumeReadableStream(): TODO;
 declare function $controlledReadableStream(): TODO;
 declare function $controller(): TODO;
 declare function $cork(): TODO;
@@ -368,6 +369,7 @@ declare function $readableStreamToArray(): TODO;
 declare function $reader(): TODO;
 declare function $readyPromise(): TODO;
 declare function $readyPromiseCapability(): TODO;
+declare function $removeAbortAlgorithmFromSignal(signal: AbortSignal, algorithmIdentifier: number): TODO;
 declare function $redirect(): TODO;
 declare function $relative(): TODO;
 declare function $releaseLock(): TODO;
@@ -480,8 +482,7 @@ declare interface PromiseConstructor<T> extends ClassWithIntrinsics<PromiseConst
 
 declare interface UnderlyingSource {
   $lazy?: boolean;
-  $bunNativeType?: number;
-  $bunNativePtr?: number;
+  $bunNativePtr?: undefined | TODO;
   autoAllocateChunkSize?: number;
 }
 
