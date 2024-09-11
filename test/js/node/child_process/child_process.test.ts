@@ -1,10 +1,10 @@
-import { describe, it, expect, afterAll, beforeEach } from "bun:test";
-import { ChildProcess, spawn, execFile, exec, spawnSync, execFileSync, execSync } from "node:child_process";
-import { promisify } from "node:util";
-import { bunExe, bunEnv, isWindows, tmpdirSync, nodeExe, shellExe } from "harness";
-import path from "path";
 import { semver } from "bun";
+import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import fs from "fs";
+import { bunEnv, bunExe, isWindows, nodeExe, shellExe, tmpdirSync } from "harness";
+import { ChildProcess, exec, execFile, execFileSync, execSync, spawn, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
+import path from "path";
 const debug = process.env.DEBUG ? console.log : () => {};
 
 const originalProcessEnv = process.env;
@@ -69,7 +69,7 @@ describe("spawn()", () => {
   it("should disallow invalid filename", () => {
     // @ts-ignore
     expect(() => spawn(123)).toThrow({
-      message: 'The "file" argument must be of type string. Received 123',
+      message: 'The "file" argument must be of type string. Received: 123',
       code: "ERR_INVALID_ARG_TYPE",
     });
   });
@@ -223,7 +223,7 @@ describe("spawn()", () => {
 
   it("should allow us to spawn in the default shell", async () => {
     const shellPath: string = await new Promise(resolve => {
-      const child = spawn("echo", [isWindows ? "$env:SHELL" : "$SHELL"], { shell: true });
+      const child = spawn("echo", [isWindows ? "$PSHOME" : "$SHELL"], { shell: true });
       child.stdout.on("data", data => {
         resolve(data.toString().trim());
       });
@@ -240,7 +240,7 @@ describe("spawn()", () => {
   it("should allow us to spawn in a specified shell", async () => {
     const shell = shellExe();
     const shellPath: string = await new Promise(resolve => {
-      const child = spawn("echo", [isWindows ? "$env:SHELL" : "$SHELL"], { shell });
+      const child = spawn("echo", [isWindows ? "$PSHOME" : "$SHELL"], { shell });
       child.stdout.on("data", data => {
         resolve(data.toString().trim());
       });

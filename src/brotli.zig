@@ -12,7 +12,7 @@ const mimalloc = bun.Mimalloc;
 const BrotliAllocator = struct {
     pub fn alloc(_: ?*anyopaque, len: usize) callconv(.C) *anyopaque {
         if (bun.heap_breakdown.enabled) {
-            const zone = bun.heap_breakdown.getZone(BrotliAllocator);
+            const zone = bun.heap_breakdown.getZone("brotli");
             return zone.malloc_zone_malloc(len) orelse bun.outOfMemory();
         }
 
@@ -21,7 +21,7 @@ const BrotliAllocator = struct {
 
     pub fn free(_: ?*anyopaque, data: ?*anyopaque) callconv(.C) void {
         if (bun.heap_breakdown.enabled) {
-            const zone = bun.heap_breakdown.getZone(BrotliAllocator);
+            const zone = bun.heap_breakdown.getZone("brotli");
             zone.malloc_zone_free(data);
             return;
         }
@@ -181,17 +181,28 @@ pub const BrotliCompressionStream = struct {
     state: State = State.Inflating,
     total_out: usize = 0,
     total_in: usize = 0,
+    flushOp: BrotliEncoder.Operation,
+    finishFlushOp: BrotliEncoder.Operation,
+    fullFlushOp: BrotliEncoder.Operation,
 
-    pub fn init() !BrotliCompressionStream {
+    pub fn init(
+        flushOp: BrotliEncoder.Operation,
+        finishFlushOp: BrotliEncoder.Operation,
+        fullFlushOp: BrotliEncoder.Operation,
+    ) !BrotliCompressionStream {
         const instance = BrotliEncoder.createInstance(&BrotliAllocator.alloc, &BrotliAllocator.free, null) orelse return error.BrotliFailedToCreateInstance;
 
         return BrotliCompressionStream{
             .brotli = instance,
+            .flushOp = flushOp,
+            .finishFlushOp = finishFlushOp,
+            .fullFlushOp = fullFlushOp,
         };
     }
 
     pub fn writeChunk(this: *BrotliCompressionStream, input: []const u8, last: bool) ![]const u8 {
-        const result = this.brotli.compressStream(if (last) BrotliEncoder.Operation.finish else .process, input);
+        this.total_in += input.len;
+        const result = this.brotli.compressStream(if (last) this.finishFlushOp else this.flushOp, input);
 
         if (!result.success) {
             this.state = .Error;

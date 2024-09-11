@@ -15,6 +15,9 @@
     "src/bun.js/WebKit": true,
     "src/deps/*/**": true,
     "test/node.js/upstream": true,
+    // This will fill up your whole search history.
+    "test/js/node/test/fixtures": true,
+    "test/js/node/test/common": true,
   },
   "search.followSymlinks": false,
   "search.useIgnoreFiles": true,
@@ -42,8 +45,11 @@
     "editor.defaultFormatter": "ziglang.vscode-zig",
   },
 
-  // C++
+  // lldb
+  "lldb.launch.initCommands": ["command source ${workspaceFolder}/.lldbinit"],
   "lldb.verboseLogging": false,
+
+  // C++
   "cmake.configureOnOpen": false,
   "C_Cpp.errorSquiggles": "enabled",
   "[cpp]": {
@@ -55,6 +61,7 @@
   "[h]": {
     "editor.defaultFormatter": "xaver.clang-format",
   },
+  "clangd.arguments": ["-header-insertion=never"],
 
   // JavaScript
   "prettier.enable": true,
@@ -132,6 +139,7 @@
   },
   "files.associations": {
     "*.idl": "cpp",
+    "array": "cpp",
   },
   "C_Cpp.files.exclude": {
     "**/.vscode": true,

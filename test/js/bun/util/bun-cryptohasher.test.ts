@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { describe, expect, test } from "bun:test";
 
 test("Bun.file in CryptoHasher is not supported yet", () => {
   expect(() => Bun.SHA1.hash(Bun.file(import.meta.path))).toThrow();
@@ -6,7 +6,14 @@ test("Bun.file in CryptoHasher is not supported yet", () => {
   expect(() => new Bun.CryptoHasher("sha1").update(Bun.file(import.meta.path))).toThrow();
   expect(() => new Bun.SHA1().update(Bun.file(import.meta.path))).toThrow();
 });
-
+test("CryptoHasher update should throw when no parameter/null/undefined is passed", () => {
+  // @ts-expect-error
+  expect(() => new Bun.CryptoHasher("sha1").update()).toThrow();
+  // @ts-expect-error
+  expect(() => new Bun.CryptoHasher("sha1").update(undefined)).toThrow();
+  // @ts-expect-error
+  expect(() => new Bun.CryptoHasher("sha1").update(null)).toThrow();
+});
 describe("Hash is consistent", () => {
   const sourceInputs = [
     Buffer.from([
